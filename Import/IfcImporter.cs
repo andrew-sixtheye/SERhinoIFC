@@ -15,13 +15,28 @@ namespace SERhinoIFC.Import
 {
     public class IfcImporter
     {
-        public int Import(string filePath, RhinoDoc doc)
+        /// <summary>
+        /// Reads the IFC file's declared length unit without running a full import.
+        /// </summary>
+        public IfcUnitInfo ReadUnitInfo(string filePath)
+        {
+            using (var model = IfcStore.Open(filePath))
+            {
+                return UnitResolver.GetIfcUnitInfo(model);
+            }
+        }
+
+        public int Import(string filePath, RhinoDoc doc, IfcUnitInfo ifcUnitOverride = null)
         {
             int objectCount = 0;
 
             using (var model = IfcStore.Open(filePath))
             {
-                double scaleFactor = UnitResolver.GetScaleFactor(model, doc);
+                double scaleFactor;
+                if (ifcUnitOverride != null)
+                    scaleFactor = UnitResolver.ComputeScaleFactor(ifcUnitOverride, doc);
+                else
+                    scaleFactor = UnitResolver.GetScaleFactor(model, doc);
 
                 // Build lookup: element -> storey name
                 var storeyLookup = BuildStoreyLookup(model);
