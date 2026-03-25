@@ -108,7 +108,7 @@ namespace SERhinoIFC.Export
         {
             var attrs = rhinoObj.Attributes;
 
-            // Standard attributes
+            // Preserve original GlobalId
             string globalId = attrs.GetUserString("GlobalId");
             if (!string.IsNullOrEmpty(globalId))
                 element.GlobalId = globalId;

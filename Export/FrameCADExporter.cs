@@ -41,6 +41,7 @@ namespace SERhinoIFC.Export
             };
 
             string xbimPath = System.IO.Path.ChangeExtension(filePath, ".xbim");
+            try { System.IO.File.Delete(xbimPath); } catch { }
 
             using (var model = IfcStore.Create(xbimPath, credentials, XbimSchemaVersion.Ifc2X3))
             {
