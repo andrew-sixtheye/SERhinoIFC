@@ -212,11 +212,8 @@ namespace SERhinoIFC.Export
             if (geom is Brep brep)
                 return ExtractFromBrep(brep, scaleFactor, rhinoObj.Name);
 
-            if (geom is Curve)
-            {
-                RhinoApp.WriteLine($"Object '{rhinoObj.Name}' is a curve -- skipped. Model as Extrusion or Brep.");
-                return null;
-            }
+            if (geom is Mesh mesh)
+                return ExtractFromMesh(mesh, scaleFactor, rhinoObj.Name);
 
             RhinoApp.WriteLine($"Object '{rhinoObj.Name}' is not a supported geometry type -- skipped.");
             return null;
@@ -247,6 +244,9 @@ namespace SERhinoIFC.Export
 
         private MemberGeometry ExtractFromBrep(Brep brep, double scaleFactor, string name)
         {
+            // Group all planar faces by their normal direction.
+            // Cap faces share the same normal (or opposite), side faces have different normals.
+            // The two groups of coplanar faces that are furthest apart are the caps.
             var planarFaces = new List<(BrepFace face, Plane plane)>();
             foreach (var face in brep.Faces)
             {
@@ -254,43 +254,284 @@ namespace SERhinoIFC.Export
                     planarFaces.Add((face, plane));
             }
 
-            for (int i = 0; i < planarFaces.Count; i++)
+            if (planarFaces.Count < 2)
             {
-                for (int j = i + 1; j < planarFaces.Count; j++)
+                RhinoApp.WriteLine($"Object '{name}' has fewer than 2 planar faces -- skipped.");
+                return null;
+            }
+
+            // Group faces by normal direction (parallel normals within tolerance)
+            var normalGroups = new List<List<(BrepFace face, Plane plane)>>();
+            foreach (var pf in planarFaces)
+            {
+                bool added = false;
+                foreach (var group in normalGroups)
                 {
-                    var n1 = planarFaces[i].plane.Normal;
-                    var n2 = planarFaces[j].plane.Normal;
-                    double dot = Math.Abs(n1 * n2);
+                    double dot = Math.Abs(pf.plane.Normal * group[0].plane.Normal);
                     if (dot > 0.999)
                     {
-                        var centroid1 = AreaMassProperties.Compute(planarFaces[i].face)?.Centroid ?? Point3d.Origin;
-                        var centroid2 = AreaMassProperties.Compute(planarFaces[j].face)?.Centroid ?? Point3d.Origin;
+                        group.Add(pf);
+                        added = true;
+                        break;
+                    }
+                }
+                if (!added)
+                    normalGroups.Add(new List<(BrepFace, Plane)> { pf });
+            }
 
-                        var axisDir = centroid2 - centroid1;
-                        double length = axisDir.Length * scaleFactor;
-                        axisDir.Unitize();
+            // Find the pair of face groups with the same normal direction that are
+            // separated by the greatest distance (these are the two cap ends)
+            BrepFace capFace1 = null, capFace2 = null;
+            Point3d cap1Center = Point3d.Origin, cap2Center = Point3d.Origin;
+            double maxDist = 0;
 
-                        var boundary = planarFaces[i].face.OuterLoop?.To3dCurve();
-                        var profilePoints = boundary != null
-                            ? GetProfilePoints2D(boundary, axisDir, centroid1, scaleFactor)
-                            : null;
-
-                        return new MemberGeometry
+            foreach (var group in normalGroups)
+            {
+                // Split group into coplanar sub-groups (faces at different positions along the normal)
+                var subGroups = new List<List<(BrepFace face, Point3d centroid)>>();
+                foreach (var (face, plane) in group)
+                {
+                    var centroid = AreaMassProperties.Compute(face)?.Centroid ?? Point3d.Origin;
+                    bool matched = false;
+                    foreach (var sg in subGroups)
+                    {
+                        double distAlongNormal = Math.Abs((centroid - sg[0].centroid) * plane.Normal);
+                        if (distAlongNormal < 0.01) // coplanar
                         {
-                            StartPoint = new Point3d(centroid1.X * scaleFactor, centroid1.Y * scaleFactor, centroid1.Z * scaleFactor),
-                            AxisDirection = axisDir,
-                            RefDirection = ComputeRefDirection(axisDir),
-                            Length = length,
-                            ProfilePoints = profilePoints,
-                            ProfileWidth = profilePoints != null ? EstimateProfileWidth(profilePoints) : 45.0,
-                            ProfileDepth = profilePoints != null ? EstimateProfileDepth(profilePoints) : 150.0
-                        };
+                            sg.Add((face, centroid));
+                            matched = true;
+                            break;
+                        }
+                    }
+                    if (!matched)
+                        subGroups.Add(new List<(BrepFace, Point3d)> { (face, centroid) });
+                }
+
+                // Check pairs of sub-groups for maximum separation
+                for (int i = 0; i < subGroups.Count; i++)
+                {
+                    for (int j = i + 1; j < subGroups.Count; j++)
+                    {
+                        var c1 = subGroups[i][0].centroid;
+                        var c2 = subGroups[j][0].centroid;
+                        double dist = c1.DistanceTo(c2);
+                        if (dist > maxDist)
+                        {
+                            maxDist = dist;
+                            // Pick the largest face from each sub-group as the cap
+                            capFace1 = subGroups[i].OrderByDescending(f =>
+                                AreaMassProperties.Compute(f.face)?.Area ?? 0).First().face;
+                            capFace2 = subGroups[j].OrderByDescending(f =>
+                                AreaMassProperties.Compute(f.face)?.Area ?? 0).First().face;
+                            cap1Center = c1;
+                            cap2Center = c2;
+                        }
                     }
                 }
             }
 
-            RhinoApp.WriteLine($"Object '{name}' does not have two parallel planar cap faces -- skipped.");
-            return null;
+            if (capFace1 == null || capFace2 == null)
+            {
+                RhinoApp.WriteLine($"Object '{name}' could not identify cap faces -- skipped.");
+                return null;
+            }
+
+            var axisDir = cap2Center - cap1Center;
+            double length = axisDir.Length * scaleFactor;
+            axisDir.Unitize();
+
+            // Extract the profile from the cap face boundary
+            var boundary = capFace1.OuterLoop?.To3dCurve();
+            var profilePoints = boundary != null
+                ? GetProfilePoints2D(boundary, axisDir, cap1Center, scaleFactor)
+                : null;
+
+            return new MemberGeometry
+            {
+                StartPoint = new Point3d(cap1Center.X * scaleFactor, cap1Center.Y * scaleFactor, cap1Center.Z * scaleFactor),
+                AxisDirection = axisDir,
+                RefDirection = ComputeRefDirection(axisDir),
+                Length = length,
+                ProfilePoints = profilePoints,
+                ProfileWidth = profilePoints != null ? EstimateProfileWidth(profilePoints) : 45.0,
+                ProfileDepth = profilePoints != null ? EstimateProfileDepth(profilePoints) : 150.0
+            };
+        }
+
+        private MemberGeometry ExtractFromMesh(Mesh mesh, double scaleFactor, string name)
+        {
+            if (mesh == null || mesh.Vertices.Count < 6 || mesh.Faces.Count < 4)
+            {
+                RhinoApp.WriteLine($"Object '{name}' mesh is too simple -- skipped.");
+                return null;
+            }
+
+            mesh.FaceNormals.ComputeFaceNormals();
+
+            // Group mesh faces by normal direction (parallel normals within tolerance)
+            var normalGroups = new List<(Vector3f normal, List<int> faceIndices)>();
+            for (int i = 0; i < mesh.Faces.Count; i++)
+            {
+                var fn = mesh.FaceNormals[i];
+                bool added = false;
+                foreach (var group in normalGroups)
+                {
+                    double dot = Math.Abs(group.normal.X * fn.X + group.normal.Y * fn.Y + group.normal.Z * fn.Z);
+                    if (dot > 0.99)
+                    {
+                        group.faceIndices.Add(i);
+                        added = true;
+                        break;
+                    }
+                }
+                if (!added)
+                    normalGroups.Add((fn, new List<int> { i }));
+            }
+
+            // Find end cap groups: two groups with opposite normals that are coplanar within each group
+            // End caps have the most faces in their normal direction (for tessellated C-shapes, the caps
+            // have many triangles). But actually, we want the pair with the greatest separation distance.
+            double maxSeparation = 0;
+            List<int> capFaces1 = null, capFaces2 = null;
+            Vector3d axisDir = Vector3d.ZAxis;
+
+            foreach (var group in normalGroups)
+            {
+                if (group.faceIndices.Count < 2) continue;
+
+                // Split into coplanar sub-groups by projecting face centroids onto the normal
+                var normal = new Vector3d(group.normal.X, group.normal.Y, group.normal.Z);
+                var subGroups = new List<(double projVal, List<int> faces)>();
+
+                foreach (int fi in group.faceIndices)
+                {
+                    var f = mesh.Faces[fi];
+                    var centroid = (Point3d)(mesh.Vertices[f.A] + mesh.Vertices[f.B] + mesh.Vertices[f.C]) / 3.0;
+                    double proj = centroid.X * normal.X + centroid.Y * normal.Y + centroid.Z * normal.Z;
+
+                    bool matched = false;
+                    foreach (var sg in subGroups)
+                    {
+                        if (Math.Abs(proj - sg.projVal) < 0.01)
+                        {
+                            sg.faces.Add(fi);
+                            matched = true;
+                            break;
+                        }
+                    }
+                    if (!matched)
+                        subGroups.Add((proj, new List<int> { fi }));
+                }
+
+                // Find the pair of sub-groups with maximum separation
+                for (int i = 0; i < subGroups.Count; i++)
+                {
+                    for (int j = i + 1; j < subGroups.Count; j++)
+                    {
+                        double sep = Math.Abs(subGroups[i].projVal - subGroups[j].projVal);
+                        if (sep > maxSeparation)
+                        {
+                            maxSeparation = sep;
+                            capFaces1 = subGroups[i].faces;
+                            capFaces2 = subGroups[j].faces;
+                            axisDir = normal;
+                        }
+                    }
+                }
+            }
+
+            if (capFaces1 == null || capFaces2 == null || maxSeparation < 0.1)
+            {
+                RhinoApp.WriteLine($"Object '{name}' could not identify end cap faces in mesh -- skipped.");
+                return null;
+            }
+
+            axisDir.Unitize();
+
+            // Collect unique vertices from cap1 faces
+            var cap1VertexIndices = new HashSet<int>();
+            foreach (int fi in capFaces1)
+            {
+                var f = mesh.Faces[fi];
+                cap1VertexIndices.Add(f.A);
+                cap1VertexIndices.Add(f.B);
+                cap1VertexIndices.Add(f.C);
+                if (f.IsQuad) cap1VertexIndices.Add(f.D);
+            }
+
+            // Compute centroids of each cap
+            var cap1Pts = cap1VertexIndices.Select(vi => (Point3d)mesh.Vertices[vi]).ToList();
+            var cap1Center = new Point3d(
+                cap1Pts.Average(p => p.X),
+                cap1Pts.Average(p => p.Y),
+                cap1Pts.Average(p => p.Z));
+
+            var cap2VertexIndices = new HashSet<int>();
+            foreach (int fi in capFaces2)
+            {
+                var f = mesh.Faces[fi];
+                cap2VertexIndices.Add(f.A);
+                cap2VertexIndices.Add(f.B);
+                cap2VertexIndices.Add(f.C);
+                if (f.IsQuad) cap2VertexIndices.Add(f.D);
+            }
+            var cap2Pts = cap2VertexIndices.Select(vi => (Point3d)mesh.Vertices[vi]).ToList();
+            var cap2Center = new Point3d(
+                cap2Pts.Average(p => p.X),
+                cap2Pts.Average(p => p.Y),
+                cap2Pts.Average(p => p.Z));
+
+            // Axis direction from cap1 to cap2
+            var memberAxis = cap2Center - cap1Center;
+            double length = memberAxis.Length * scaleFactor;
+            memberAxis.Unitize();
+
+            // Project cap1 vertices onto a plane perpendicular to the axis to get 2D profile
+            var refDir = ComputeRefDirection(memberAxis);
+            var yDir = Vector3d.CrossProduct(memberAxis, refDir);
+            yDir.Unitize();
+            var capPlane = new Plane(cap1Center, refDir, yDir);
+
+            var profilePts = new List<Point2d>();
+            foreach (var pt in cap1Pts)
+            {
+                double u, v;
+                capPlane.ClosestParameter(pt, out u, out v);
+                profilePts.Add(new Point2d(u * scaleFactor, v * scaleFactor));
+            }
+
+            // Order the profile points by angle around the centroid to form a proper polygon
+            double cx = profilePts.Average(p => p.X);
+            double cy = profilePts.Average(p => p.Y);
+            profilePts = profilePts
+                .OrderBy(p => Math.Atan2(p.Y - cy, p.X - cx))
+                .ToList();
+
+            // Remove near-duplicate points (tessellation creates many close vertices)
+            var cleanedPts = new List<Point2d> { profilePts[0] };
+            for (int i = 1; i < profilePts.Count; i++)
+            {
+                if (profilePts[i].DistanceTo(cleanedPts[cleanedPts.Count - 1]) > 0.1)
+                    cleanedPts.Add(profilePts[i]);
+            }
+            profilePts = cleanedPts;
+
+            if (profilePts.Count < 3)
+            {
+                RhinoApp.WriteLine($"Object '{name}' cap profile has fewer than 3 unique points -- skipped.");
+                return null;
+            }
+
+            return new MemberGeometry
+            {
+                StartPoint = new Point3d(cap1Center.X * scaleFactor, cap1Center.Y * scaleFactor, cap1Center.Z * scaleFactor),
+                AxisDirection = memberAxis,
+                RefDirection = refDir,
+                Length = length,
+                ProfilePoints = profilePts,
+                ProfileWidth = EstimateProfileWidth(profilePts),
+                ProfileDepth = EstimateProfileDepth(profilePts)
+            };
         }
 
         private List<Point2d> GetProfilePoints2D(Curve profileCurve, Vector3d axisDir, Point3d origin, double scaleFactor)
