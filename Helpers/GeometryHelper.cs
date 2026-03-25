@@ -7,6 +7,7 @@ namespace SERhinoIFC.Helpers
     {
         /// <summary>
         /// Gets or creates a triangulated mesh from a Rhino geometry object.
+        /// Uses SimplePlanes to minimize vertex count on planar faces.
         /// </summary>
         public static Mesh GetTriangulatedMesh(GeometryBase geometry)
         {
@@ -18,27 +19,13 @@ namespace SERhinoIFC.Helpers
             }
             else if (geometry is Brep brep)
             {
-                var meshes = Mesh.CreateFromBrep(brep, MeshingParameters.Default);
-                if (meshes != null && meshes.Length > 0)
-                {
-                    mesh = new Mesh();
-                    foreach (var part in meshes)
-                        mesh.Append(part);
-                }
+                mesh = MeshBrep(brep);
             }
             else if (geometry is Extrusion extrusion)
             {
                 var brep2 = extrusion.ToBrep();
                 if (brep2 != null)
-                {
-                    var meshes = Mesh.CreateFromBrep(brep2, MeshingParameters.Default);
-                    if (meshes != null && meshes.Length > 0)
-                    {
-                        mesh = new Mesh();
-                        foreach (var part in meshes)
-                            mesh.Append(part);
-                    }
-                }
+                    mesh = MeshBrep(brep2);
             }
 
             if (mesh != null)
@@ -47,6 +34,20 @@ namespace SERhinoIFC.Helpers
                 mesh.Compact();
             }
 
+            return mesh;
+        }
+
+        private static Mesh MeshBrep(Brep brep)
+        {
+            var mp = new MeshingParameters();
+            mp.SimplePlanes = true;
+            var meshes = Mesh.CreateFromBrep(brep, mp);
+            if (meshes == null || meshes.Length == 0)
+                return null;
+
+            var mesh = new Mesh();
+            foreach (var part in meshes)
+                mesh.Append(part);
             return mesh;
         }
     }

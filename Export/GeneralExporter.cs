@@ -39,9 +39,7 @@ namespace SERhinoIFC.Export
                 EditorsOrganisationName = options.Organization ?? ""
             };
 
-            string xbimPath = System.IO.Path.ChangeExtension(filePath, ".xbim");
-            try { System.IO.File.Delete(xbimPath); } catch { }
-            using (var model = IfcStore.Create(xbimPath, credentials, XbimSchemaVersion.Ifc2X3))
+            using (var model = IfcStore.Create(credentials, XbimSchemaVersion.Ifc2X3, XbimStoreType.InMemoryModel))
             {
                 using (var txn = model.BeginTransaction("Create IFC"))
                 {
@@ -194,8 +192,6 @@ namespace SERhinoIFC.Export
 
                 model.SaveAs(filePath, StorageType.Ifc);
             }
-
-            try { System.IO.File.Delete(xbimPath); } catch { }
 
             return exportedCount;
         }
