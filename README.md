@@ -24,7 +24,7 @@ The export dialog lets you choose between two modes:
 
 1. Download the latest release `.zip` from the [Releases](../../releases) page.
 2. Unblock the zip: right-click the zip in Windows Explorer → Properties → check "Unblock" → OK.
-3. Extract the zip to a folder (e.g. `C:\RhinoPlugins\SERhinoIFC\`).
+3. Extract the zip to a folder (e.g. `C:\Users\YourName\AppData\Roaming\McNeel\Rhinoceros\8.0\RhinoPlugins\SERhinoIFC\`).
 4. Open Rhino → Tools → Options → Plug-ins → Install → browse to `SERhinoIFC.rhp`.
 5. Restart Rhino. The `IfcImport` and `IfcExport` commands should now appear in the command autocomplete.
 
