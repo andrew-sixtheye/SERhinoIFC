@@ -584,34 +584,53 @@ namespace SERhinoIFC.Import
             }
             // === END DEBUG ===
 
-            // Compute extrusion height along the direction axis
-            var extrudeDirUnit = new Vector3d(
-                dir.DirectionRatios[0],
-                dir.DirectionRatios[1],
-                dir.DirectionRatios[2]);
-            extrudeDirUnit.Unitize();
-            double height = depth * scaleFactor;
-
-            // The profile is in the XY plane. We need to orient it so that
-            // its plane normal aligns with the extrusion direction.
-            // Build a plane from the extrusion direction for the profile.
-            var profilePlane = new Plane(Point3d.Origin, extrudeDirUnit);
-
-            // Remap the profile curve from WorldXY to the profile plane
-            var remapTransform = Transform.PlaneToPlane(Plane.WorldXY, profilePlane);
-            var orientedCurve = profileCurve.DuplicateCurve();
-            orientedCurve.Transform(remapTransform);
-
-            // Create the extrusion — Rhino's Extrusion.Create extrudes in the OPPOSITE
-            // direction of the plane normal when height is positive, so negate it
-            // to extrude in the +normal direction (matching IFC convention).
-            var rhinoExtrusion = Extrusion.Create(orientedCurve, -height, true);
-            if (rhinoExtrusion == null)
+            // Build the Brep manually from planar faces — exactly mirroring the mesh path.
+            // This avoids Extrusion.Create / Surface.CreateExtrusion orientation issues.
+            var profilePts = ExtractProfilePolyline(profile, scaleFactor);
+            if (profilePts == null || profilePts.Count < 3)
                 return null;
 
-            var brep = rhinoExtrusion.ToBrep();
-            if (brep == null) return null;
+            int n = profilePts.Count;
+            var bottomPts = profilePts;
+            var topPts = profilePts.Select(p => p + extrudeVec).ToList();
 
+            var faces = new List<Brep>();
+
+            // Side faces: one planar quad per profile edge
+            for (int i = 0; i < n; i++)
+            {
+                int next = (i + 1) % n;
+                var quad = new List<Point3d>
+                {
+                    bottomPts[i], bottomPts[next], topPts[next], topPts[i], bottomPts[i]
+                };
+                var quadCurve = new PolylineCurve(quad);
+                var quadBreps = Brep.CreatePlanarBreps(quadCurve, tolerance);
+                if (quadBreps != null)
+                    faces.AddRange(quadBreps);
+            }
+
+            // Bottom cap
+            var bottomLoop = new List<Point3d>(bottomPts);
+            bottomLoop.Add(bottomLoop[0]);
+            var bottomBreps = Brep.CreatePlanarBreps(new PolylineCurve(bottomLoop), tolerance);
+            if (bottomBreps != null)
+                faces.AddRange(bottomBreps);
+
+            // Top cap
+            var topLoop = new List<Point3d>(topPts);
+            topLoop.Add(topLoop[0]);
+            var topBreps = Brep.CreatePlanarBreps(new PolylineCurve(topLoop), tolerance);
+            if (topBreps != null)
+                faces.AddRange(topBreps);
+
+            if (faces.Count == 0) return null;
+
+            // Join into a closed polysurface
+            var joined = Brep.JoinBreps(faces, tolerance);
+            if (joined == null || joined.Length == 0) return null;
+
+            var brep = joined[0];
             if (!brep.IsValid)
                 brep.Repair(tolerance);
 
