@@ -11,8 +11,6 @@ namespace SERhinoIFC.Dialogs
         private readonly DropDown _ifcSchemaDropDown;
         private readonly TextBox _authorTextBox;
         private readonly TextBox _organizationTextBox;
-        private readonly TextBox _framePrefixTextBox;
-        private readonly TableRow _framePrefixRow;
 
         public ExportOptionsDialog()
         {
@@ -23,8 +21,8 @@ namespace SERhinoIFC.Dialogs
 
             // Export Mode
             _exportModeDropDown = new DropDown();
-            _exportModeDropDown.Items.Add("General IFC");
-            _exportModeDropDown.Items.Add("FrameCAD / Constructobot");
+            _exportModeDropDown.Items.Add("General IFC (Brep)");
+            _exportModeDropDown.Items.Add("SE-Cbot (Solid)");
             _exportModeDropDown.SelectedIndex = 0;
 
             // IFC Schema
@@ -38,17 +36,6 @@ namespace SERhinoIFC.Dialogs
 
             // Organization
             _organizationTextBox = new TextBox();
-
-            // Frame Name Prefix (conditional)
-            _framePrefixTextBox = new TextBox { PlaceholderText = "e.g. F1" };
-            _framePrefixRow = new TableRow(
-                new Label { Text = "Frame Name Prefix", VerticalAlignment = VerticalAlignment.Center },
-                _framePrefixTextBox
-            );
-            _framePrefixRow.ScaleHeight = false;
-
-            // Toggle frame prefix row visibility based on export mode
-            _exportModeDropDown.SelectedIndexChanged += (s, e) => UpdateFramePrefixVisibility();
 
             // Buttons
             var okButton = new Button { Text = "OK" };
@@ -86,7 +73,6 @@ namespace SERhinoIFC.Dialogs
                         new Label { Text = "Organization", VerticalAlignment = VerticalAlignment.Center },
                         _organizationTextBox
                     ),
-                    _framePrefixRow
                 }
             };
 
@@ -109,19 +95,6 @@ namespace SERhinoIFC.Dialogs
                     buttonLayout
                 }
             };
-
-            // Initial visibility
-            UpdateFramePrefixVisibility();
-        }
-
-        private void UpdateFramePrefixVisibility()
-        {
-            bool isFrameCAD = _exportModeDropDown.SelectedIndex == 1;
-            _framePrefixTextBox.Visible = isFrameCAD;
-
-            // Find the label in the row and toggle it too
-            if (_framePrefixRow.Cells.Count > 0 && _framePrefixRow.Cells[0].Control != null)
-                _framePrefixRow.Cells[0].Control.Visible = isFrameCAD;
         }
 
         private void OnOkClick(object sender, EventArgs e)
@@ -131,8 +104,7 @@ namespace SERhinoIFC.Dialogs
                 Mode = _exportModeDropDown.SelectedIndex == 0 ? ExportMode.General : ExportMode.FrameCAD,
                 IfcSchema = _ifcSchemaDropDown.SelectedValue?.ToString() ?? "IFC2x3",
                 Author = _authorTextBox.Text,
-                Organization = _organizationTextBox.Text,
-                FrameNamePrefix = _framePrefixTextBox.Text
+                Organization = _organizationTextBox.Text
             };
             Close();
         }

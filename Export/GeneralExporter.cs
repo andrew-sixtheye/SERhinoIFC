@@ -26,6 +26,7 @@ namespace SERhinoIFC.Export
         {
             int exportedCount = 0;
             double scaleFactor = RhinoMath.UnitScale(doc.ModelUnitSystem, UnitSystem.Meters);
+            var metadataWriter = new IfcMetadataWriter();
 
             var credentials = new XbimEditorCredentials
             {
@@ -42,34 +43,28 @@ namespace SERhinoIFC.Export
             {
                 using (var txn = model.BeginTransaction("Create IFC"))
                 {
-                    // Set up units — meters, no prefix
+                    // Project and units (meters)
                     var project = model.Instances.New<IfcProject>(p =>
                     {
                         p.Name = System.IO.Path.GetFileNameWithoutExtension(doc.Name ?? "RhinoExport");
                     });
 
                     var unitAssignment = model.Instances.New<IfcUnitAssignment>();
-                    var lengthUnit = model.Instances.New<IfcSIUnit>(u =>
+                    unitAssignment.Units.Add(model.Instances.New<IfcSIUnit>(u =>
                     {
                         u.UnitType = IfcUnitEnum.LENGTHUNIT;
                         u.Name = IfcSIUnitName.METRE;
-                    });
-                    unitAssignment.Units.Add(lengthUnit);
-
-                    var areaUnit = model.Instances.New<IfcSIUnit>(u =>
+                    }));
+                    unitAssignment.Units.Add(model.Instances.New<IfcSIUnit>(u =>
                     {
                         u.UnitType = IfcUnitEnum.AREAUNIT;
                         u.Name = IfcSIUnitName.SQUARE_METRE;
-                    });
-                    unitAssignment.Units.Add(areaUnit);
-
-                    var volumeUnit = model.Instances.New<IfcSIUnit>(u =>
+                    }));
+                    unitAssignment.Units.Add(model.Instances.New<IfcSIUnit>(u =>
                     {
                         u.UnitType = IfcUnitEnum.VOLUMEUNIT;
                         u.Name = IfcSIUnitName.CUBIC_METRE;
-                    });
-                    unitAssignment.Units.Add(volumeUnit);
-
+                    }));
                     project.UnitsInContext = unitAssignment;
 
                     // Representation context
@@ -86,41 +81,37 @@ namespace SERhinoIFC.Export
                     });
                     project.RepresentationContexts.Add(repContext);
 
-                    // Spatial hierarchy: Project -> Site -> Building -> Storey(s)
+                    // Spatial hierarchy
                     var site = model.Instances.New<IfcSite>(s =>
                     {
                         s.Name = "Default Site";
                         s.CompositionType = IfcElementCompositionEnum.ELEMENT;
                     });
-
                     var building = model.Instances.New<IfcBuilding>(b =>
                     {
                         b.Name = "Default Building";
                         b.CompositionType = IfcElementCompositionEnum.ELEMENT;
                     });
 
-                    // Aggregation relationships
                     model.Instances.New<IfcRelAggregates>(r =>
                     {
                         r.RelatingObject = project;
                         r.RelatedObjects.Add(site);
                     });
-
                     model.Instances.New<IfcRelAggregates>(r =>
                     {
                         r.RelatingObject = site;
                         r.RelatedObjects.Add(building);
                     });
 
-                    // Group objects by top-level layer (used as storey)
+                    // Group objects by storey (top-level layer)
                     var storeyGroups = new Dictionary<string, List<RhinoObject>>();
                     foreach (var obj in objects)
                     {
-                        var layer = doc.Layers[obj.Attributes.LayerIndex];
-                        string topLayerName = GetTopLevelLayerName(layer, doc);
-                        if (!storeyGroups.ContainsKey(topLayerName))
-                            storeyGroups[topLayerName] = new List<RhinoObject>();
-                        storeyGroups[topLayerName].Add(obj);
+                        string storeyName = IfcMetadataWriter.GetStoreyName(obj, doc);
+                        if (!storeyGroups.ContainsKey(storeyName))
+                            storeyGroups[storeyName] = new List<RhinoObject>();
+                        storeyGroups[storeyName].Add(obj);
                     }
 
                     // Create storeys and elements
@@ -152,15 +143,14 @@ namespace SERhinoIFC.Export
                                 continue;
                             }
 
-                            // Determine IFC type from layer name
-                            var layer = doc.Layers[rhinoObj.Attributes.LayerIndex];
-                            string ifcTypeName = MemberClassifier.GetIfcTypeFromLayerName(layer.FullPath);
-
-                            // Create the IFC element
-                            var element = CreateIfcElement(model, ifcTypeName, rhinoObj.Name);
+                            // Create the IFC element from user text metadata
+                            var element = metadataWriter.CreateElement(model, rhinoObj, doc);
                             if (element == null) continue;
 
-                            // Create geometry
+                            // Apply all metadata (properties, quantities, materials)
+                            metadataWriter.ApplyMetadata(model, element, rhinoObj);
+
+                            // Create geometry as FacetedBrep
                             var brep = CreateFacetedBrep(model, mesh, scaleFactor);
                             if (brep == null) continue;
 
@@ -200,36 +190,13 @@ namespace SERhinoIFC.Export
                 model.SaveAs(filePath, StorageType.Ifc);
             }
 
-            // Clean up temp xbim database file
             try { System.IO.File.Delete(xbimPath); } catch { }
 
             return exportedCount;
         }
 
-        private IfcProduct CreateIfcElement(IfcStore model, string ifcTypeName, string name)
-        {
-            string elementName = string.IsNullOrEmpty(name) ? ifcTypeName : name;
-
-            switch (ifcTypeName)
-            {
-                case "IfcWall":
-                    return model.Instances.New<IfcWall>(e => e.Name = elementName);
-                case "IfcSlab":
-                    return model.Instances.New<IfcSlab>(e => e.Name = elementName);
-                case "IfcColumn":
-                    return model.Instances.New<IfcColumn>(e => e.Name = elementName);
-                case "IfcBeam":
-                    return model.Instances.New<IfcBeam>(e => e.Name = elementName);
-                case "IfcRoof":
-                    return model.Instances.New<IfcRoof>(e => e.Name = elementName);
-                default:
-                    return model.Instances.New<IfcBuildingElementProxy>(e => e.Name = elementName);
-            }
-        }
-
         private IfcFacetedBrep CreateFacetedBrep(IfcStore model, Mesh mesh, double scaleFactor)
         {
-            // Create all cartesian points from mesh vertices
             var ifcPoints = new IfcCartesianPoint[mesh.Vertices.Count];
             for (int i = 0; i < mesh.Vertices.Count; i++)
             {
@@ -238,7 +205,6 @@ namespace SERhinoIFC.Export
                     p.SetXYZ(v.X * scaleFactor, v.Y * scaleFactor, v.Z * scaleFactor));
             }
 
-            // Create faces from triangulated mesh
             var shell = model.Instances.New<IfcClosedShell>();
 
             for (int i = 0; i < mesh.Faces.Count; i++)
@@ -267,24 +233,10 @@ namespace SERhinoIFC.Export
                 shell.CfsFaces.Add(face);
             }
 
-            var brep = model.Instances.New<IfcFacetedBrep>(fb =>
+            return model.Instances.New<IfcFacetedBrep>(fb =>
             {
                 fb.Outer = shell;
             });
-
-            return brep;
-        }
-
-        private string GetTopLevelLayerName(Layer layer, RhinoDoc doc)
-        {
-            var current = layer;
-            while (current.ParentLayerId != Guid.Empty)
-            {
-                int parentIndex = doc.Layers.FindId(current.ParentLayerId).Index;
-                if (parentIndex < 0) break;
-                current = doc.Layers[parentIndex];
-            }
-            return current.Name;
         }
     }
 }

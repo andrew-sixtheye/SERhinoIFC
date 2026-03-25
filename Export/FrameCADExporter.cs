@@ -1,7 +1,6 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using System.Text.RegularExpressions;
 using Rhino;
 using Rhino.DocObjects;
 using Rhino.Geometry;
@@ -12,13 +11,9 @@ using Xbim.Ifc2x3.GeometricConstraintResource;
 using Xbim.Ifc2x3.GeometricModelResource;
 using Xbim.Ifc2x3.GeometryResource;
 using Xbim.Ifc2x3.Kernel;
-using Xbim.Ifc2x3.MaterialPropertyResource;
-using Xbim.Ifc2x3.MaterialResource;
 using Xbim.Ifc2x3.MeasureResource;
-using Xbim.Ifc2x3.PresentationOrganizationResource;
 using Xbim.Ifc2x3.ProductExtension;
 using Xbim.Ifc2x3.ProfileResource;
-using Xbim.Ifc2x3.PropertyResource;
 using Xbim.Ifc2x3.RepresentationResource;
 using Xbim.Ifc2x3.SharedBldgElements;
 using Xbim.Ifc2x3.TopologyResource;
@@ -28,19 +23,11 @@ namespace SERhinoIFC.Export
 {
     public class FrameCADExporter
     {
-        // Regex for valid member tokens: T#, B#, H#, W#, R#, SILL#
-        private static readonly Regex MemberTokenPattern =
-            new Regex(@"^(T|B|H|W|R|SILL)\d+$", RegexOptions.IgnoreCase);
-
-        // Regex for <prefix>-<token> format
-        private static readonly Regex FullNamePattern =
-            new Regex(@"^.+-(T|B|H|W|R|SILL)\d+$", RegexOptions.IgnoreCase);
-
         public int Export(RhinoObject[] objects, string filePath, ExportOptions options, RhinoDoc doc)
         {
             int exportedCount = 0;
-            string prefix = options.FrameNamePrefix ?? "F1";
             double scaleFactor = RhinoMath.UnitScale(doc.ModelUnitSystem, UnitSystem.Millimeters);
+            var metadataWriter = new IfcMetadataWriter();
 
             var credentials = new XbimEditorCredentials
             {
@@ -58,35 +45,29 @@ namespace SERhinoIFC.Export
             {
                 using (var txn = model.BeginTransaction("FrameCAD Export"))
                 {
-                    // Set up units — millimeters
+                    // Project and units (millimeters)
                     var project = model.Instances.New<IfcProject>(p =>
                     {
                         p.Name = System.IO.Path.GetFileNameWithoutExtension(doc.Name ?? "FrameCADExport");
                     });
 
                     var unitAssignment = model.Instances.New<IfcUnitAssignment>();
-                    var lengthUnit = model.Instances.New<IfcSIUnit>(u =>
+                    unitAssignment.Units.Add(model.Instances.New<IfcSIUnit>(u =>
                     {
                         u.UnitType = IfcUnitEnum.LENGTHUNIT;
                         u.Name = IfcSIUnitName.METRE;
                         u.Prefix = IfcSIPrefix.MILLI;
-                    });
-                    unitAssignment.Units.Add(lengthUnit);
-
-                    var areaUnit = model.Instances.New<IfcSIUnit>(u =>
+                    }));
+                    unitAssignment.Units.Add(model.Instances.New<IfcSIUnit>(u =>
                     {
                         u.UnitType = IfcUnitEnum.AREAUNIT;
                         u.Name = IfcSIUnitName.SQUARE_METRE;
-                    });
-                    unitAssignment.Units.Add(areaUnit);
-
-                    var volumeUnit = model.Instances.New<IfcSIUnit>(u =>
+                    }));
+                    unitAssignment.Units.Add(model.Instances.New<IfcSIUnit>(u =>
                     {
                         u.UnitType = IfcUnitEnum.VOLUMEUNIT;
                         u.Name = IfcSIUnitName.CUBIC_METRE;
-                    });
-                    unitAssignment.Units.Add(volumeUnit);
-
+                    }));
                     project.UnitsInContext = unitAssignment;
 
                     // Representation context
@@ -109,17 +90,10 @@ namespace SERhinoIFC.Export
                         s.Name = "Default Site";
                         s.CompositionType = IfcElementCompositionEnum.ELEMENT;
                     });
-
                     var building = model.Instances.New<IfcBuilding>(b =>
                     {
                         b.Name = "Default Building";
                         b.CompositionType = IfcElementCompositionEnum.ELEMENT;
-                    });
-
-                    var storey = model.Instances.New<IfcBuildingStorey>(s =>
-                    {
-                        s.Name = "Level 1";
-                        s.CompositionType = IfcElementCompositionEnum.ELEMENT;
                     });
 
                     model.Instances.New<IfcRelAggregates>(r =>
@@ -132,111 +106,88 @@ namespace SERhinoIFC.Export
                         r.RelatingObject = site;
                         r.RelatedObjects.Add(building);
                     });
-                    model.Instances.New<IfcRelAggregates>(r =>
+
+                    // Group objects by storey (top-level layer)
+                    var storeyGroups = new Dictionary<string, List<RhinoObject>>();
+                    foreach (var obj in objects)
                     {
-                        r.RelatingObject = building;
-                        r.RelatedObjects.Add(storey);
-                    });
-
-                    var containment = model.Instances.New<IfcRelContainedInSpatialStructure>(r =>
-                    {
-                        r.RelatingStructure = storey;
-                    });
-
-                    // Create shared material with steel properties
-                    var material = model.Instances.New<IfcMaterial>(m =>
-                    {
-                        m.Name = "Cold-formed Steel";
-                    });
-
-                    // Track member names and tokens for layer classification
-                    var memberData = new List<(IfcProduct element, string memberName, string token)>();
-                    int autoIndex = 1;
-
-                    foreach (var rhinoObj in objects)
-                    {
-                        // Extract axis + profile from geometry
-                        var memberGeom = ExtractMemberGeometry(rhinoObj, scaleFactor);
-                        if (memberGeom == null)
-                            continue;
-
-                        // Resolve member name
-                        string memberName = ResolveMemberName(rhinoObj, prefix, ref autoIndex);
-                        string token = ExtractToken(memberName);
-
-                        RhinoApp.WriteLine($"  {rhinoObj.Name ?? "(unnamed)"} -> {memberName}");
-
-                        // Determine IFC type from token
-                        bool isColumn = token.StartsWith("W", StringComparison.OrdinalIgnoreCase);
-
-                        // Create the IFC element
-                        IfcProduct element;
-                        if (isColumn)
-                        {
-                            element = model.Instances.New<IfcColumn>(e => e.Name = memberName);
-                        }
-                        else
-                        {
-                            element = model.Instances.New<IfcMember>(e => e.Name = memberName);
-                        }
-
-                        // Build the profile definition
-                        var profileDef = CreateProfileDef(model, memberGeom);
-
-                        // Build IFCEXTRUDEDAREASOLID
-                        var extrudedSolid = model.Instances.New<IfcExtrudedAreaSolid>(eas =>
-                        {
-                            eas.SweptArea = profileDef;
-                            eas.Position = model.Instances.New<IfcAxis2Placement3D>(a =>
-                            {
-                                a.Location = model.Instances.New<IfcCartesianPoint>(p => p.SetXYZ(0, 0, 0));
-                            });
-                            eas.ExtrudedDirection = model.Instances.New<IfcDirection>(d =>
-                                d.SetXYZ(0, 0, 1));
-                            eas.Depth = memberGeom.Length;
-                        });
-
-                        // Shape representation
-                        var shapeRep = model.Instances.New<IfcShapeRepresentation>(sr =>
-                        {
-                            sr.ContextOfItems = repContext;
-                            sr.RepresentationIdentifier = "Body";
-                            sr.RepresentationType = "SweptSolid";
-                            sr.Items.Add(extrudedSolid);
-                        });
-
-                        var productShape = model.Instances.New<IfcProductDefinitionShape>(ps =>
-                        {
-                            ps.Representations.Add(shapeRep);
-                        });
-
-                        element.Representation = productShape;
-
-                        // Object placement: Z axis = member axis, X axis = ref direction
-                        element.ObjectPlacement = CreateMemberPlacement(model, memberGeom);
-
-                        containment.RelatedElements.Add(element);
-                        memberData.Add((element, memberName, token));
-
-                        // Material association for this element
-                        model.Instances.New<IfcRelAssociatesMaterial>(ram =>
-                        {
-                            ram.RelatingMaterial = material;
-                            ram.RelatedObjects.Add(element);
-                        });
-
-                        // Profile property set
-                        CreateProfileProperties(model, element, profileDef, memberGeom);
-
-                        exportedCount++;
+                        string storeyName = IfcMetadataWriter.GetStoreyName(obj, doc);
+                        if (!storeyGroups.ContainsKey(storeyName))
+                            storeyGroups[storeyName] = new List<RhinoObject>();
+                        storeyGroups[storeyName].Add(obj);
                     }
 
-                    // Material properties: YieldStress and UltimateStress
-                    RhinoApp.WriteLine("Note: Using default cold-formed steel values (550 MPa yield/ultimate).");
-                    CreateMaterialProperties(model, material);
+                    foreach (var kvp in storeyGroups)
+                    {
+                        var storey = model.Instances.New<IfcBuildingStorey>(s =>
+                        {
+                            s.Name = kvp.Key;
+                            s.CompositionType = IfcElementCompositionEnum.ELEMENT;
+                        });
 
-                    // Layer assignment: TRUSS vs PANEL
-                    AssignLayers(model, memberData, prefix);
+                        model.Instances.New<IfcRelAggregates>(r =>
+                        {
+                            r.RelatingObject = building;
+                            r.RelatedObjects.Add(storey);
+                        });
+
+                        var containment = model.Instances.New<IfcRelContainedInSpatialStructure>(r =>
+                        {
+                            r.RelatingStructure = storey;
+                        });
+
+                        foreach (var rhinoObj in kvp.Value)
+                        {
+                            // Extract member geometry (axis + profile) from Rhino geometry
+                            var memberGeom = ExtractMemberGeometry(rhinoObj, scaleFactor);
+                            if (memberGeom == null)
+                                continue;
+
+                            // Create IFC element from user text metadata
+                            var element = metadataWriter.CreateElement(model, rhinoObj, doc);
+                            if (element == null) continue;
+
+                            // Apply all metadata (properties, quantities, materials)
+                            metadataWriter.ApplyMetadata(model, element, rhinoObj);
+
+                            // Build profile definition from extracted geometry
+                            var profileDef = CreateProfileDef(model, memberGeom);
+
+                            // Build ExtrudedAreaSolid
+                            var extrudedSolid = model.Instances.New<IfcExtrudedAreaSolid>(eas =>
+                            {
+                                eas.SweptArea = profileDef;
+                                eas.Position = model.Instances.New<IfcAxis2Placement3D>(a =>
+                                {
+                                    a.Location = model.Instances.New<IfcCartesianPoint>(p => p.SetXYZ(0, 0, 0));
+                                });
+                                eas.ExtrudedDirection = model.Instances.New<IfcDirection>(d =>
+                                    d.SetXYZ(0, 0, 1));
+                                eas.Depth = memberGeom.Length;
+                            });
+
+                            var shapeRep = model.Instances.New<IfcShapeRepresentation>(sr =>
+                            {
+                                sr.ContextOfItems = repContext;
+                                sr.RepresentationIdentifier = "Body";
+                                sr.RepresentationType = "SweptSolid";
+                                sr.Items.Add(extrudedSolid);
+                            });
+
+                            var productShape = model.Instances.New<IfcProductDefinitionShape>(ps =>
+                            {
+                                ps.Representations.Add(shapeRep);
+                            });
+
+                            element.Representation = productShape;
+
+                            // Object placement: Z axis = member axis, X axis = ref direction
+                            element.ObjectPlacement = CreateMemberPlacement(model, memberGeom);
+
+                            containment.RelatedElements.Add(element);
+                            exportedCount++;
+                        }
+                    }
 
                     txn.Commit();
                 }
@@ -248,47 +199,6 @@ namespace SERhinoIFC.Export
 
             return exportedCount;
         }
-
-        #region Member Naming
-
-        private string ResolveMemberName(RhinoObject obj, string prefix, ref int autoIndex)
-        {
-            string name = obj.Name;
-
-            // Case 1: Already has <prefix>-<token> format
-            if (!string.IsNullOrEmpty(name) && FullNamePattern.IsMatch(name))
-                return name;
-
-            // Case 2: Name has no dash — prepend prefix
-            if (!string.IsNullOrEmpty(name) && !name.Contains("-"))
-            {
-                if (MemberTokenPattern.IsMatch(name))
-                    return $"{prefix}-{name}";
-                // Name doesn't match a token, use it as prefix with auto token
-                return $"{prefix}-{name}";
-            }
-
-            // Case 3: Empty name — auto assign W<index>
-            if (string.IsNullOrEmpty(name))
-            {
-                string result = $"{prefix}-W{autoIndex}";
-                autoIndex++;
-                return result;
-            }
-
-            // Fallback: use as-is if it has a dash
-            return name;
-        }
-
-        private string ExtractToken(string memberName)
-        {
-            int dashIndex = memberName.LastIndexOf('-');
-            if (dashIndex >= 0 && dashIndex < memberName.Length - 1)
-                return memberName.Substring(dashIndex + 1);
-            return memberName;
-        }
-
-        #endregion
 
         #region Geometry Extraction
 
@@ -304,7 +214,7 @@ namespace SERhinoIFC.Export
 
             if (geom is Curve)
             {
-                RhinoApp.WriteLine($"Object '{rhinoObj.Name}' is a curve with no profile data -- skipped. Model as an Extrusion object to export.");
+                RhinoApp.WriteLine($"Object '{rhinoObj.Name}' is a curve -- skipped. Model as Extrusion or Brep.");
                 return null;
             }
 
@@ -320,7 +230,6 @@ namespace SERhinoIFC.Export
             axisDir.Unitize();
             double length = pathStart.DistanceTo(pathEnd) * scaleFactor;
 
-            // Get profile curve in 2D
             var profileCurve = extrusion.Profile3d(0, 0);
             var profilePoints = GetProfilePoints2D(profileCurve, axisDir, pathStart, scaleFactor);
 
@@ -338,7 +247,6 @@ namespace SERhinoIFC.Export
 
         private MemberGeometry ExtractFromBrep(Brep brep, double scaleFactor, string name)
         {
-            // Find two parallel planar faces (cap faces)
             var planarFaces = new List<(BrepFace face, Plane plane)>();
             foreach (var face in brep.Faces)
             {
@@ -346,14 +254,12 @@ namespace SERhinoIFC.Export
                     planarFaces.Add((face, plane));
             }
 
-            // Find a pair of parallel planar faces
             for (int i = 0; i < planarFaces.Count; i++)
             {
                 for (int j = i + 1; j < planarFaces.Count; j++)
                 {
                     var n1 = planarFaces[i].plane.Normal;
                     var n2 = planarFaces[j].plane.Normal;
-                    // Check if parallel (normals are same or opposite direction)
                     double dot = Math.Abs(n1 * n2);
                     if (dot > 0.999)
                     {
@@ -364,17 +270,14 @@ namespace SERhinoIFC.Export
                         double length = axisDir.Length * scaleFactor;
                         axisDir.Unitize();
 
-                        // Use the first cap face boundary as the profile
                         var boundary = planarFaces[i].face.OuterLoop?.To3dCurve();
                         var profilePoints = boundary != null
                             ? GetProfilePoints2D(boundary, axisDir, centroid1, scaleFactor)
                             : null;
 
-                        var startPt = centroid1;
-
                         return new MemberGeometry
                         {
-                            StartPoint = new Point3d(startPt.X * scaleFactor, startPt.Y * scaleFactor, startPt.Z * scaleFactor),
+                            StartPoint = new Point3d(centroid1.X * scaleFactor, centroid1.Y * scaleFactor, centroid1.Z * scaleFactor),
                             AxisDirection = axisDir,
                             RefDirection = ComputeRefDirection(axisDir),
                             Length = length,
@@ -392,20 +295,16 @@ namespace SERhinoIFC.Export
 
         private List<Point2d> GetProfilePoints2D(Curve profileCurve, Vector3d axisDir, Point3d origin, double scaleFactor)
         {
-            if (profileCurve == null)
-                return null;
+            if (profileCurve == null) return null;
 
-            // Build a local coordinate system: Z = axis, X = refDir, Y = cross
             var refDir = ComputeRefDirection(axisDir);
             var yDir = Vector3d.CrossProduct(axisDir, refDir);
             yDir.Unitize();
 
             var plane = new Plane(origin, refDir, yDir);
 
-            // Discretize the curve
             var polyline = profileCurve.ToPolyline(0.01, 0.1, 0, 0);
-            if (polyline == null)
-                return null;
+            if (polyline == null) return null;
 
             var pts = new List<Point2d>();
             var pl = polyline.ToPolyline();
@@ -418,7 +317,6 @@ namespace SERhinoIFC.Export
                 pts.Add(new Point2d(u * scaleFactor, v * scaleFactor));
             }
 
-            // Remove duplicate closing point if present
             if (pts.Count > 1 && pts[0].DistanceTo(pts[pts.Count - 1]) < 0.01)
                 pts.RemoveAt(pts.Count - 1);
 
@@ -427,8 +325,6 @@ namespace SERhinoIFC.Export
 
         private Vector3d ComputeRefDirection(Vector3d axisDir)
         {
-            // Choose a reference direction perpendicular to the axis
-            // Use world X unless axis is nearly parallel to X
             var worldX = Vector3d.XAxis;
             if (Math.Abs(axisDir * worldX) > 0.95)
                 worldX = Vector3d.YAxis;
@@ -443,17 +339,13 @@ namespace SERhinoIFC.Export
         private double EstimateProfileWidth(List<Point2d> points)
         {
             if (points == null || points.Count < 2) return 45.0;
-            double minX = points.Min(p => p.X);
-            double maxX = points.Max(p => p.X);
-            return Math.Abs(maxX - minX);
+            return Math.Abs(points.Max(p => p.X) - points.Min(p => p.X));
         }
 
         private double EstimateProfileDepth(List<Point2d> points)
         {
             if (points == null || points.Count < 2) return 150.0;
-            double minY = points.Min(p => p.Y);
-            double maxY = points.Max(p => p.Y);
-            return Math.Abs(maxY - minY);
+            return Math.Abs(points.Max(p => p.Y) - points.Min(p => p.Y));
         }
 
         #endregion
@@ -464,7 +356,6 @@ namespace SERhinoIFC.Export
         {
             if (geom.ProfilePoints != null && geom.ProfilePoints.Count >= 3)
             {
-                // Use arbitrary closed profile from actual profile points
                 var polyline = model.Instances.New<IfcPolyline>(pl =>
                 {
                     foreach (var pt in geom.ProfilePoints)
@@ -472,7 +363,6 @@ namespace SERhinoIFC.Export
                         pl.Points.Add(model.Instances.New<IfcCartesianPoint>(cp =>
                             cp.SetXY(pt.X, pt.Y)));
                     }
-                    // Close the polyline
                     var first = geom.ProfilePoints[0];
                     pl.Points.Add(model.Instances.New<IfcCartesianPoint>(cp =>
                         cp.SetXY(first.X, first.Y)));
@@ -486,7 +376,6 @@ namespace SERhinoIFC.Export
             }
             else
             {
-                // Fallback: 150x45mm rectangle
                 RhinoApp.WriteLine("  Warning: No profile data available, using default 150x45mm rectangle.");
                 return model.Instances.New<IfcRectangleProfileDef>(p =>
                 {
@@ -510,95 +399,18 @@ namespace SERhinoIFC.Export
                     a.Location = model.Instances.New<IfcCartesianPoint>(p =>
                         p.SetXYZ(geom.StartPoint.X, geom.StartPoint.Y, geom.StartPoint.Z));
 
-                    // Z axis = member axis direction
                     a.Axis = model.Instances.New<IfcDirection>(d =>
                         d.SetXYZ(geom.AxisDirection.X, geom.AxisDirection.Y, geom.AxisDirection.Z));
 
-                    // X axis = reference direction (web direction)
                     a.RefDirection = model.Instances.New<IfcDirection>(d =>
                         d.SetXYZ(geom.RefDirection.X, geom.RefDirection.Y, geom.RefDirection.Z));
                 });
             });
         }
 
-        private void CreateProfileProperties(IfcStore model, IfcProduct element,
-            IfcProfileDef profileDef, MemberGeometry geom)
-        {
-            // Create a property set with profile dimensions
-            var pset = model.Instances.New<IfcPropertySet>(ps =>
-            {
-                ps.Name = "FrameCAD_ProfileProperties";
-                ps.HasProperties.Add(model.Instances.New<IfcPropertySingleValue>(pv =>
-                {
-                    pv.Name = "WebDepth";
-                    pv.NominalValue = new Xbim.Ifc2x3.MeasureResource.IfcLengthMeasure(geom.ProfileDepth);
-                }));
-                ps.HasProperties.Add(model.Instances.New<IfcPropertySingleValue>(pv =>
-                {
-                    pv.Name = "FlangeWidth";
-                    pv.NominalValue = new Xbim.Ifc2x3.MeasureResource.IfcLengthMeasure(geom.ProfileWidth);
-                }));
-            });
-
-            model.Instances.New<IfcRelDefinesByProperties>(rd =>
-            {
-                rd.RelatingPropertyDefinition = pset;
-                rd.RelatedObjects.Add(element);
-            });
-        }
-
-        private void CreateMaterialProperties(IfcStore model, IfcMaterial material)
-        {
-            // Use IfcMechanicalSteelMaterialProperties which has native YieldStress/UltimateStress
-            model.Instances.New<IfcMechanicalSteelMaterialProperties>(sp =>
-            {
-                sp.Material = material;
-                sp.YieldStress = 550.0;
-                sp.UltimateStress = 550.0;
-            });
-        }
-
-        private void AssignLayers(IfcStore model,
-            List<(IfcProduct element, string memberName, string token)> memberData,
-            string frameName)
-        {
-            if (memberData.Count == 0) return;
-
-            // Determine if this is a truss or panel frame
-            // Truss: has both T*/B* (chords) and W* (webs) tokens
-            bool hasChords = memberData.Any(m =>
-                m.token.StartsWith("T", StringComparison.OrdinalIgnoreCase) ||
-                m.token.StartsWith("B", StringComparison.OrdinalIgnoreCase));
-            bool hasWebs = memberData.Any(m =>
-                m.token.StartsWith("W", StringComparison.OrdinalIgnoreCase));
-            bool isTruss = hasChords && hasWebs;
-
-            string layerName = isTruss ? $"{frameName}_TRUSS" : $"{frameName}_PANEL";
-
-            var layer = model.Instances.New<IfcPresentationLayerAssignment>(pla =>
-            {
-                pla.Name = layerName;
-                foreach (var md in memberData)
-                {
-                    // Add the shape representations to the layer
-                    var rep = md.element.Representation;
-                    if (rep != null)
-                    {
-                        foreach (var shapeRep in rep.Representations)
-                        {
-                            pla.AssignedItems.Add(shapeRep);
-                        }
-                    }
-                }
-            });
-        }
-
         #endregion
     }
 
-    /// <summary>
-    /// Intermediate data structure for extracted member geometry.
-    /// </summary>
     internal class MemberGeometry
     {
         public Point3d StartPoint { get; set; }
