@@ -631,10 +631,307 @@ namespace SERhinoIFC.Import
                 Name = elementName,
                 LayerIndex = layerIndex
             };
-            attributes.SetUserString("IfcGlobalId", element.GlobalId.ToString());
+
+            SetAllMetadata(attributes, element);
 
             doc.Objects.AddMesh(rhinoMesh, attributes);
             return 1;
+        }
+
+        private void SetAllMetadata(ObjectAttributes attributes, IIfcProduct element)
+        {
+            // 1. IFC entity type
+            attributes.SetUserString("IfcType", element.ExpressType.ExpressName);
+
+            // 2. Standard IFC attributes
+            attributes.SetUserString("GlobalId", element.GlobalId.ToString());
+
+            if (element.Name.HasValue)
+                attributes.SetUserString("Name", element.Name.Value.ToString());
+            if (element.Description.HasValue)
+                attributes.SetUserString("Description", element.Description.Value.ToString());
+            if (element.ObjectType.HasValue)
+                attributes.SetUserString("ObjectType", element.ObjectType.Value.ToString());
+
+            if (element is IIfcObject obj && obj.ObjectType.HasValue)
+                attributes.SetUserString("ObjectType", obj.ObjectType.Value.ToString());
+
+            // Tag (on IfcElement)
+            if (element is IIfcElement elem && elem.Tag.HasValue)
+                attributes.SetUserString("Tag", elem.Tag.Value.ToString());
+
+            // PredefinedType — varies by subtype, use reflection-free approach via known interfaces
+            SetPredefinedType(attributes, element);
+
+            // 3. All IfcPropertySet properties via IfcRelDefinesByProperties
+            var propRels = element.IsDefinedBy
+                .OfType<IIfcRelDefinesByProperties>();
+            foreach (var rel in propRels)
+            {
+                if (rel.RelatingPropertyDefinition is IIfcPropertySet pset)
+                {
+                    string psetName = pset.Name?.ToString() ?? "PropertySet";
+                    foreach (var prop in pset.HasProperties)
+                    {
+                        string key = $"{psetName}.{prop.Name}";
+                        string value = GetPropertyValue(prop);
+                        if (value != null)
+                            attributes.SetUserString(key, value);
+                    }
+                }
+                else if (rel.RelatingPropertyDefinition is IIfcPropertySetDefinitionSelect psetSelect)
+                {
+                    // Handle property set definition sets (IFC4)
+                    if (psetSelect is IIfcPropertySetDefinition singleDef)
+                    {
+                        WritePropertySetDefinition(attributes, singleDef);
+                    }
+                }
+            }
+
+            // 4. All IfcQuantitySet values via IfcRelDefinesByProperties → IfcElementQuantity
+            foreach (var rel in propRels)
+            {
+                if (rel.RelatingPropertyDefinition is IIfcElementQuantity qset)
+                {
+                    string qsetName = qset.Name?.ToString() ?? "Quantities";
+                    foreach (var q in qset.Quantities)
+                    {
+                        string key = $"{qsetName}.{q.Name}";
+                        string value = GetQuantityValue(q);
+                        if (value != null)
+                            attributes.SetUserString(key, value);
+                    }
+                }
+            }
+
+            // 5. Type properties (from IfcRelDefinesByType → IfcTypeObject)
+            var typeRels = element.IsTypedBy;
+            if (typeRels != null)
+            {
+                foreach (var typeRel in typeRels)
+                {
+                    var typeObj = typeRel.RelatingType;
+                    if (typeObj != null)
+                    {
+                        attributes.SetUserString("TypeName", typeObj.Name?.ToString() ?? "");
+
+                        if (typeObj.HasPropertySets != null)
+                        {
+                            foreach (var psetDef in typeObj.HasPropertySets)
+                            {
+                                WritePropertySetDefinition(attributes, psetDef);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 6. Material associations
+            var materialRels = element.HasAssociations
+                .OfType<IIfcRelAssociatesMaterial>();
+            foreach (var matRel in materialRels)
+            {
+                var matSelect = matRel.RelatingMaterial;
+                SetMaterialInfo(attributes, matSelect);
+            }
+        }
+
+        private void WritePropertySetDefinition(ObjectAttributes attributes, IIfcPropertySetDefinition psetDef)
+        {
+            if (psetDef is IIfcPropertySet pset)
+            {
+                string psetName = pset.Name?.ToString() ?? "PropertySet";
+                foreach (var prop in pset.HasProperties)
+                {
+                    string key = $"{psetName}.{prop.Name}";
+                    string value = GetPropertyValue(prop);
+                    if (value != null)
+                        attributes.SetUserString(key, value);
+                }
+            }
+            else if (psetDef is IIfcElementQuantity qset)
+            {
+                string qsetName = qset.Name?.ToString() ?? "Quantities";
+                foreach (var q in qset.Quantities)
+                {
+                    string key = $"{qsetName}.{q.Name}";
+                    string value = GetQuantityValue(q);
+                    if (value != null)
+                        attributes.SetUserString(key, value);
+                }
+            }
+        }
+
+        private string GetPropertyValue(IIfcProperty prop)
+        {
+            if (prop is IIfcPropertySingleValue single)
+            {
+                if (single.NominalValue == null) return null;
+                string val = single.NominalValue.Value?.ToString() ?? "";
+                // Append unit if present
+                if (single.Unit is IIfcSIUnit siUnit)
+                {
+                    string prefix = siUnit.Prefix.HasValue ? siUnit.Prefix.Value.ToString() + " " : "";
+                    val += $" [{prefix}{siUnit.Name}]";
+                }
+                else if (single.Unit is IIfcConversionBasedUnit convUnit)
+                {
+                    val += $" [{convUnit.Name}]";
+                }
+                return val;
+            }
+            if (prop is IIfcPropertyEnumeratedValue enumVal)
+            {
+                var values = enumVal.EnumerationValues?.Select(v => v.Value?.ToString() ?? "");
+                return values != null ? string.Join(", ", values) : null;
+            }
+            if (prop is IIfcPropertyBoundedValue bounded)
+            {
+                string upper = bounded.UpperBoundValue?.Value?.ToString() ?? "?";
+                string lower = bounded.LowerBoundValue?.Value?.ToString() ?? "?";
+                return $"{lower} - {upper}";
+            }
+            if (prop is IIfcPropertyListValue listVal)
+            {
+                var values = listVal.ListValues?.Select(v => v.Value?.ToString() ?? "");
+                return values != null ? string.Join(", ", values) : null;
+            }
+            if (prop is IIfcPropertyTableValue tableVal)
+            {
+                return $"[Table: {tableVal.DefiningValues?.Count() ?? 0} entries]";
+            }
+            if (prop is IIfcComplexProperty complex)
+            {
+                // Recurse into sub-properties won't fit user strings well,
+                // so flatten with dot notation
+                return $"[Complex: {complex.HasProperties.Count()} sub-properties]";
+            }
+            return prop.ToString();
+        }
+
+        private string GetQuantityValue(IIfcPhysicalQuantity q)
+        {
+            if (q is IIfcQuantityLength ql)
+                return $"{ql.LengthValue} [length]";
+            if (q is IIfcQuantityArea qa)
+                return $"{qa.AreaValue} [area]";
+            if (q is IIfcQuantityVolume qv)
+                return $"{qv.VolumeValue} [volume]";
+            if (q is IIfcQuantityWeight qw)
+                return $"{qw.WeightValue} [weight]";
+            if (q is IIfcQuantityCount qc)
+                return $"{qc.CountValue} [count]";
+            if (q is IIfcQuantityTime qt)
+                return $"{qt.TimeValue} [time]";
+            return q.ToString();
+        }
+
+        private void SetPredefinedType(ObjectAttributes attributes, IIfcProduct element)
+        {
+            // Check common element types for PredefinedType
+            string predefined = null;
+            if (element is IIfcWall wall) predefined = wall.PredefinedType?.ToString();
+            else if (element is IIfcColumn col) predefined = col.PredefinedType?.ToString();
+            else if (element is IIfcBeam beam) predefined = beam.PredefinedType?.ToString();
+            else if (element is IIfcSlab slab) predefined = slab.PredefinedType?.ToString();
+            else if (element is IIfcDoor door) predefined = door.PredefinedType?.ToString();
+            else if (element is IIfcWindow win) predefined = win.PredefinedType?.ToString();
+            else if (element is IIfcRoof roof) predefined = roof.PredefinedType?.ToString();
+            else if (element is IIfcStair stair) predefined = stair.PredefinedType?.ToString();
+            else if (element is IIfcRailing rail) predefined = rail.PredefinedType?.ToString();
+            else if (element is IIfcMember member) predefined = member.PredefinedType?.ToString();
+            else if (element is IIfcPlate plate) predefined = plate.PredefinedType?.ToString();
+            else if (element is IIfcCovering cov) predefined = cov.PredefinedType?.ToString();
+            else if (element is IIfcCurtainWall cw) predefined = cw.PredefinedType?.ToString();
+            else if (element is IIfcBuildingElementProxy proxy) predefined = proxy.PredefinedType?.ToString();
+            else if (element is IIfcPile pile) predefined = pile.PredefinedType?.ToString();
+            else if (element is IIfcFooting footing) predefined = footing.PredefinedType?.ToString();
+            else if (element is IIfcSpace space) predefined = space.PredefinedType?.ToString();
+
+            if (!string.IsNullOrEmpty(predefined))
+                attributes.SetUserString("PredefinedType", predefined);
+        }
+
+        private void SetMaterialInfo(ObjectAttributes attributes, IIfcMaterialSelect matSelect)
+        {
+            if (matSelect is IIfcMaterial mat)
+            {
+                attributes.SetUserString("Material.Name", mat.Name.ToString());
+            }
+            else if (matSelect is IIfcMaterialList matList)
+            {
+                var names = matList.Materials.Select(m => m.Name.ToString());
+                attributes.SetUserString("Material.Name", string.Join("; ", names));
+            }
+            else if (matSelect is IIfcMaterialLayerSetUsage layerUsage)
+            {
+                SetMaterialLayerSet(attributes, layerUsage.ForLayerSet);
+            }
+            else if (matSelect is IIfcMaterialLayerSet layerSet)
+            {
+                SetMaterialLayerSet(attributes, layerSet);
+            }
+            else if (matSelect is IIfcMaterialProfileSetUsage profileUsage)
+            {
+                var profSet = profileUsage.ForProfileSet;
+                if (profSet != null)
+                {
+                    if (profSet.Name.HasValue)
+                        attributes.SetUserString("Material.ProfileSet", profSet.Name.Value.ToString());
+
+                    int idx = 0;
+                    foreach (var mp in profSet.MaterialProfiles)
+                    {
+                        if (mp.Material != null)
+                            attributes.SetUserString($"Material.Profile[{idx}].Name", mp.Material.Name.ToString());
+                        if (mp.Profile != null && mp.Profile.ProfileName.HasValue)
+                            attributes.SetUserString($"Material.Profile[{idx}].Profile", mp.Profile.ProfileName.Value.ToString());
+                        idx++;
+                    }
+                }
+            }
+            else if (matSelect is IIfcMaterialConstituentSet constSet)
+            {
+                if (constSet.Name.HasValue)
+                    attributes.SetUserString("Material.ConstituentSet", constSet.Name.Value.ToString());
+
+                foreach (var constituent in constSet.MaterialConstituents)
+                {
+                    string cName = constituent.Name?.ToString() ?? "Unnamed";
+                    if (constituent.Material != null)
+                        attributes.SetUserString($"Material.{cName}", constituent.Material.Name.ToString());
+                }
+            }
+            else if (matSelect is IIfcMaterialLayer layer)
+            {
+                if (layer.Material != null)
+                    attributes.SetUserString("Material.Name", layer.Material.Name.ToString());
+                attributes.SetUserString("Material.LayerThickness", layer.LayerThickness.ToString());
+            }
+            else if (matSelect is IIfcMaterialProfile profile)
+            {
+                if (profile.Material != null)
+                    attributes.SetUserString("Material.Name", profile.Material.Name.ToString());
+                if (profile.Profile != null && profile.Profile.ProfileName.HasValue)
+                    attributes.SetUserString("Material.Profile", profile.Profile.ProfileName.Value.ToString());
+            }
+        }
+
+        private void SetMaterialLayerSet(ObjectAttributes attributes, IIfcMaterialLayerSet layerSet)
+        {
+            if (layerSet == null) return;
+            if (layerSet.LayerSetName.HasValue)
+                attributes.SetUserString("Material.LayerSet", layerSet.LayerSetName.Value.ToString());
+
+            int idx = 0;
+            foreach (var layer in layerSet.MaterialLayers)
+            {
+                if (layer.Material != null)
+                    attributes.SetUserString($"Material.Layer[{idx}].Name", layer.Material.Name.ToString());
+                attributes.SetUserString($"Material.Layer[{idx}].Thickness", layer.LayerThickness.ToString());
+                idx++;
+            }
         }
 
         private int AddOrphanMeshToDoc(RhinoDoc doc, Mesh rhinoMesh, string name,
