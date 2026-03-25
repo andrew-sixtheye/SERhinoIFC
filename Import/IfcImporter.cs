@@ -602,8 +602,10 @@ namespace SERhinoIFC.Import
             var orientedCurve = profileCurve.DuplicateCurve();
             orientedCurve.Transform(remapTransform);
 
-            // Create the extrusion — profile at start, extrudes along its normal by height
-            var rhinoExtrusion = Extrusion.Create(orientedCurve, height, true);
+            // Create the extrusion — Rhino's Extrusion.Create extrudes in the OPPOSITE
+            // direction of the plane normal when height is positive, so negate it
+            // to extrude in the +normal direction (matching IFC convention).
+            var rhinoExtrusion = Extrusion.Create(orientedCurve, -height, true);
             if (rhinoExtrusion == null)
                 return null;
 
