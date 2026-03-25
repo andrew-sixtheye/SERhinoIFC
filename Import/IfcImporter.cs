@@ -83,7 +83,8 @@ namespace SERhinoIFC.Import
             {
                 totalShapes++;
 
-                if (shapeInstance.RepresentationType != XbimGeometryRepresentationType.OpeningsAndAdditionsExcluded)
+                if (shapeInstance.RepresentationType != XbimGeometryRepresentationType.OpeningsAndAdditionsExcluded
+                    && shapeInstance.RepresentationType != XbimGeometryRepresentationType.OpeningsAndAdditionsIncluded)
                 {
                     skippedRepType++;
                     continue;
@@ -147,18 +148,30 @@ namespace SERhinoIFC.Import
             int objectCount = 0;
 
             // Fallback 1: IfcFacetedBrep - read triangulated faces directly
-            var facetedBreps = model.Instances.OfType<IIfcFacetedBrep>();
+            var facetedBreps = model.Instances.OfType<IIfcFacetedBrep>().ToList();
+            RhinoApp.WriteLine($"SERhinoIFC: Found {facetedBreps.Count} IIfcFacetedBrep entities for fallback.");
             foreach (var brep in facetedBreps)
             {
                 try
                 {
                     var mesh = ConvertFacetedBrep(brep, scaleFactor);
                     if (mesh == null || mesh.Vertices.Count == 0)
+                    {
+                        RhinoApp.WriteLine($"SERhinoIFC: FacetedBrep #{brep.EntityLabel} produced null/empty mesh.");
                         continue;
+                    }
 
                     var product = FindOwningProduct(model, brep);
                     if (product != null)
+                    {
                         objectCount += AddMeshToDoc(doc, mesh, product, storeyLookup);
+                    }
+                    else
+                    {
+                        // Ownership lookup failed — add geometry with a placeholder name
+                        RhinoApp.WriteLine($"SERhinoIFC: FacetedBrep #{brep.EntityLabel} has no owning product. Adding as orphan geometry.");
+                        objectCount += AddOrphanMeshToDoc(doc, mesh, $"FacetedBrep_{brep.EntityLabel}", storeyLookup);
+                    }
                 }
                 catch (Exception ex)
                 {
@@ -167,18 +180,29 @@ namespace SERhinoIFC.Import
             }
 
             // Fallback 2: IfcExtrudedAreaSolid - build extrusion geometry
-            var extrusions = model.Instances.OfType<IIfcExtrudedAreaSolid>();
+            var extrusions = model.Instances.OfType<IIfcExtrudedAreaSolid>().ToList();
+            RhinoApp.WriteLine($"SERhinoIFC: Found {extrusions.Count} IIfcExtrudedAreaSolid entities for fallback.");
             foreach (var extrusion in extrusions)
             {
                 try
                 {
                     var mesh = ConvertExtrudedAreaSolid(extrusion, scaleFactor);
                     if (mesh == null || mesh.Vertices.Count == 0)
+                    {
+                        RhinoApp.WriteLine($"SERhinoIFC: ExtrudedAreaSolid #{extrusion.EntityLabel} produced null/empty mesh.");
                         continue;
+                    }
 
                     var product = FindOwningProduct(model, extrusion);
                     if (product != null)
+                    {
                         objectCount += AddMeshToDoc(doc, mesh, product, storeyLookup);
+                    }
+                    else
+                    {
+                        RhinoApp.WriteLine($"SERhinoIFC: ExtrudedAreaSolid #{extrusion.EntityLabel} has no owning product. Adding as orphan geometry.");
+                        objectCount += AddOrphanMeshToDoc(doc, mesh, $"Extrusion_{extrusion.EntityLabel}", storeyLookup);
+                    }
                 }
                 catch (Exception ex)
                 {
@@ -526,28 +550,49 @@ namespace SERhinoIFC.Import
 
         private IIfcProduct FindOwningProduct(IModel model, IIfcRepresentationItem repItem)
         {
-            // Walk up: RepresentationItem -> ShapeRepresentation -> ProductRepresentation -> Product
+            // Strategy 1: Use entity label matching to find the ShapeRepresentation containing this item
+            int targetLabel = repItem.EntityLabel;
             foreach (var rep in model.Instances.OfType<IIfcShapeRepresentation>())
             {
-                if (rep.Items.Contains(repItem))
+                bool found = false;
+                foreach (var item in rep.Items)
                 {
-                    // Found the representation, now find the product
-                    foreach (var prodRep in model.Instances.OfType<IIfcProductDefinitionShape>())
+                    if (item.EntityLabel == targetLabel)
                     {
-                        if (prodRep.Representations.Contains(rep))
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) continue;
+
+                // Found the representation, now find the product via entity label matching
+                int repLabel = rep.EntityLabel;
+                foreach (var prodRep in model.Instances.OfType<IIfcProductDefinitionShape>())
+                {
+                    bool hasRep = false;
+                    foreach (var r in prodRep.Representations)
+                    {
+                        if (r.EntityLabel == repLabel)
                         {
-                            var products = model.Instances.OfType<IIfcProduct>()
-                                .Where(p => p.Representation == prodRep);
-                            return products.FirstOrDefault();
+                            hasRep = true;
+                            break;
                         }
                     }
+                    if (!hasRep) continue;
+
+                    int prodRepLabel = prodRep.EntityLabel;
+                    var product = model.Instances.OfType<IIfcProduct>()
+                        .FirstOrDefault(p => p.Representation != null && p.Representation.EntityLabel == prodRepLabel);
+                    if (product != null) return product;
                 }
             }
 
-            // Try walking through IfcBooleanClippingResult and other CSG items
+            // Strategy 2: Walk through IfcBooleanResult CSG trees
             foreach (var boolResult in model.Instances.OfType<IIfcBooleanResult>())
             {
-                if (boolResult.FirstOperand == repItem || boolResult.SecondOperand == repItem)
+                if (boolResult.FirstOperand is IIfcRepresentationItem first && first.EntityLabel == targetLabel)
+                    return FindOwningProduct(model, boolResult);
+                if (boolResult.SecondOperand is IIfcRepresentationItem second && second.EntityLabel == targetLabel)
                     return FindOwningProduct(model, boolResult);
             }
 
@@ -572,6 +617,22 @@ namespace SERhinoIFC.Import
                 LayerIndex = layerIndex
             };
             attributes.SetUserString("IfcGlobalId", element.GlobalId.ToString());
+
+            doc.Objects.AddMesh(rhinoMesh, attributes);
+            return 1;
+        }
+
+        private int AddOrphanMeshToDoc(RhinoDoc doc, Mesh rhinoMesh, string name,
+            Dictionary<int, string> storeyLookup)
+        {
+            string layerPath = "Unsorted::OrphanGeometry";
+            int layerIndex = GetOrCreateLayer(doc, layerPath);
+
+            var attributes = new ObjectAttributes
+            {
+                Name = name,
+                LayerIndex = layerIndex
+            };
 
             doc.Objects.AddMesh(rhinoMesh, attributes);
             return 1;
