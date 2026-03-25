@@ -248,74 +248,223 @@ namespace SERhinoIFC.Import
             int objectCount = 0;
             double tol = doc.ModelAbsoluteTolerance;
 
-            // Brep path 1: IfcExtrudedAreaSolid → clean extrusion Breps
-            var extrusions = model.Instances.OfType<IIfcExtrudedAreaSolid>().ToList();
-            RhinoApp.WriteLine($"SERhinoIFC: Brep import — {extrusions.Count} extrusions found.");
-            foreach (var extrusion in extrusions)
+            // Iterate all IFC products (walls, beams, columns, etc.) — this guarantees
+            // we always have the product for metadata and its ObjectPlacement for positioning.
+            var products = model.Instances.OfType<IIfcProduct>().ToList();
+            RhinoApp.WriteLine($"SERhinoIFC: Brep import — processing {products.Count} products.");
+
+            foreach (var product in products)
             {
-                try
+                if (product.Representation == null) continue;
+
+                // Compute the full world transform from the product's ObjectPlacement chain
+                Transform worldPlacement = GetObjectPlacementTransform(product.ObjectPlacement, scaleFactor);
+
+                // Walk all representation items for this product
+                foreach (var rep in product.Representation.Representations)
                 {
-                    var brep = ConvertExtrudedAreaSolidToBrep(extrusion, scaleFactor, tol);
-                    if (brep == null)
+                    var shapeRep = rep as IIfcShapeRepresentation;
+                    if (shapeRep == null) continue;
+
+                    foreach (var item in shapeRep.Items)
                     {
-                        RhinoApp.WriteLine($"SERhinoIFC: ExtrudedAreaSolid #{extrusion.EntityLabel} — Brep conversion failed, trying mesh fallback.");
-                        var mesh = ConvertExtrudedAreaSolid(extrusion, scaleFactor);
-                        if (mesh != null && mesh.Vertices.Count > 0)
+                        try
                         {
-                            var product = FindOwningProduct(model, extrusion);
-                            if (product != null)
-                                objectCount += AddMeshToDoc(doc, mesh, product, storeyLookup);
+                            Brep brep = TryConvertRepItemToBrep(item, scaleFactor, tol);
+
+                            if (brep != null)
+                            {
+                                brep.Transform(worldPlacement);
+                                objectCount += AddBrepToDoc(doc, brep, product, storeyLookup);
+                            }
+                            else
+                            {
+                                // Mesh fallback for items that can't become Breps
+                                Mesh mesh = TryConvertRepItemToMesh(item, scaleFactor);
+                                if (mesh != null && mesh.Vertices.Count > 0)
+                                {
+                                    mesh.Transform(worldPlacement);
+                                    objectCount += AddMeshToDoc(doc, mesh, product, storeyLookup);
+                                }
+                            }
                         }
-                        continue;
-                    }
-
-                    var owner = FindOwningProduct(model, extrusion);
-                    if (owner != null)
-                        objectCount += AddBrepToDoc(doc, brep, owner, storeyLookup);
-                    else
-                        objectCount += AddOrphanBrepToDoc(doc, brep, $"Extrusion_{extrusion.EntityLabel}");
-                }
-                catch (Exception ex)
-                {
-                    RhinoApp.WriteLine($"SERhinoIFC: Brep extrusion #{extrusion.EntityLabel} failed: {ex.Message}");
-                }
-            }
-
-            // Brep path 2: IfcFacetedBrep → joined planar Breps
-            var facetedBreps = model.Instances.OfType<IIfcFacetedBrep>().ToList();
-            RhinoApp.WriteLine($"SERhinoIFC: Brep import — {facetedBreps.Count} faceted breps found.");
-            foreach (var fbrep in facetedBreps)
-            {
-                try
-                {
-                    var brep = ConvertFacetedBrepToBrep(fbrep, scaleFactor, tol);
-                    if (brep == null)
-                    {
-                        RhinoApp.WriteLine($"SERhinoIFC: FacetedBrep #{fbrep.EntityLabel} — Brep conversion failed, trying mesh fallback.");
-                        var mesh = ConvertFacetedBrep(fbrep, scaleFactor);
-                        if (mesh != null && mesh.Vertices.Count > 0)
+                        catch (Exception ex)
                         {
-                            var product = FindOwningProduct(model, fbrep);
-                            if (product != null)
-                                objectCount += AddMeshToDoc(doc, mesh, product, storeyLookup);
+                            RhinoApp.WriteLine($"SERhinoIFC: Brep conversion failed for item #{item.EntityLabel} on {product.ExpressType.ExpressName} '{product.Name}': {ex.Message}");
                         }
-                        continue;
                     }
-
-                    var owner = FindOwningProduct(model, fbrep);
-                    if (owner != null)
-                        objectCount += AddBrepToDoc(doc, brep, owner, storeyLookup);
-                    else
-                        objectCount += AddOrphanBrepToDoc(doc, brep, $"FacetedBrep_{fbrep.EntityLabel}");
-                }
-                catch (Exception ex)
-                {
-                    RhinoApp.WriteLine($"SERhinoIFC: Brep faceted #{fbrep.EntityLabel} failed: {ex.Message}");
                 }
             }
 
             RhinoApp.WriteLine($"SERhinoIFC: Brep import completed — {objectCount} objects.");
             return objectCount;
+        }
+
+        /// <summary>
+        /// Attempts to convert a representation item to a Brep.
+        /// Handles IfcExtrudedAreaSolid, IfcFacetedBrep, and IfcBooleanResult (recursing into operands).
+        /// </summary>
+        private Brep TryConvertRepItemToBrep(IIfcRepresentationItem item, double scaleFactor, double tolerance)
+        {
+            if (item is IIfcExtrudedAreaSolid extrusion)
+                return ConvertExtrudedAreaSolidToBrep(extrusion, scaleFactor, tolerance);
+
+            if (item is IIfcFacetedBrep fbrep)
+                return ConvertFacetedBrepToBrep(fbrep, scaleFactor, tolerance);
+
+            // Handle Boolean results — try to convert the first operand
+            if (item is IIfcBooleanResult boolResult)
+            {
+                if (boolResult.FirstOperand is IIfcRepresentationItem firstOp)
+                    return TryConvertRepItemToBrep(firstOp, scaleFactor, tolerance);
+            }
+
+            // Handle mapped items (IfcMappedItem → IfcRepresentationMap)
+            if (item is IIfcMappedItem mapped)
+            {
+                var mapSource = mapped.MappingSource;
+                if (mapSource?.MappedRepresentation != null)
+                {
+                    foreach (var subItem in mapSource.MappedRepresentation.Items)
+                    {
+                        var brep = TryConvertRepItemToBrep(subItem, scaleFactor, tolerance);
+                        if (brep != null)
+                        {
+                            // Apply mapping target transform
+                            if (mapped.MappingTarget != null)
+                            {
+                                var mapTransform = GetCartesianTransformOperator(mapped.MappingTarget as IIfcCartesianTransformationOperator3D, scaleFactor);
+                                brep.Transform(mapTransform);
+                            }
+                            return brep;
+                        }
+                    }
+                }
+            }
+
+            return null;
+        }
+
+        /// <summary>
+        /// Attempts to convert a representation item to a Mesh (fallback when Brep fails).
+        /// </summary>
+        private Mesh TryConvertRepItemToMesh(IIfcRepresentationItem item, double scaleFactor)
+        {
+            if (item is IIfcExtrudedAreaSolid extrusion)
+                return ConvertExtrudedAreaSolid(extrusion, scaleFactor);
+
+            if (item is IIfcFacetedBrep fbrep)
+                return ConvertFacetedBrep(fbrep, scaleFactor);
+
+            if (item is IIfcBooleanResult boolResult)
+            {
+                if (boolResult.FirstOperand is IIfcRepresentationItem firstOp)
+                    return TryConvertRepItemToMesh(firstOp, scaleFactor);
+            }
+
+            if (item is IIfcMappedItem mapped)
+            {
+                var mapSource = mapped.MappingSource;
+                if (mapSource?.MappedRepresentation != null)
+                {
+                    foreach (var subItem in mapSource.MappedRepresentation.Items)
+                    {
+                        var mesh = TryConvertRepItemToMesh(subItem, scaleFactor);
+                        if (mesh != null)
+                        {
+                            if (mapped.MappingTarget != null)
+                            {
+                                var mapTransform = GetCartesianTransformOperator(mapped.MappingTarget as IIfcCartesianTransformationOperator3D, scaleFactor);
+                                mesh.Transform(mapTransform);
+                            }
+                            return mesh;
+                        }
+                    }
+                }
+            }
+
+            return null;
+        }
+
+        /// <summary>
+        /// Resolves the full world transform for an IfcProduct by walking up
+        /// the IfcLocalPlacement.PlacementRelTo chain.
+        /// </summary>
+        private Transform GetObjectPlacementTransform(IIfcObjectPlacement objectPlacement, double scaleFactor)
+        {
+            if (objectPlacement == null)
+                return Transform.Identity;
+
+            var localPlacement = objectPlacement as IIfcLocalPlacement;
+            if (localPlacement == null)
+                return Transform.Identity;
+
+            // Get this level's transform
+            Transform thisTransform = Transform.Identity;
+            if (localPlacement.RelativePlacement is IIfcAxis2Placement3D axis3d)
+            {
+                thisTransform = GetPlacementTransform(axis3d, scaleFactor);
+            }
+
+            // Walk up to parent placement
+            Transform parentTransform = Transform.Identity;
+            if (localPlacement.PlacementRelTo != null)
+            {
+                parentTransform = GetObjectPlacementTransform(localPlacement.PlacementRelTo, scaleFactor);
+            }
+
+            // Parent * local = world
+            return parentTransform * thisTransform;
+        }
+
+        /// <summary>
+        /// Converts an IfcCartesianTransformationOperator3D (used by IfcMappedItem) to a Rhino Transform.
+        /// </summary>
+        private Transform GetCartesianTransformOperator(IIfcCartesianTransformationOperator3D op, double scaleFactor)
+        {
+            if (op == null) return Transform.Identity;
+
+            var origin = Point3d.Origin;
+            if (op.LocalOrigin != null)
+            {
+                var c = op.LocalOrigin.Coordinates.ToArray();
+                origin = new Point3d(
+                    (c.Length > 0 ? c[0] : 0) * scaleFactor,
+                    (c.Length > 1 ? c[1] : 0) * scaleFactor,
+                    (c.Length > 2 ? c[2] : 0) * scaleFactor);
+            }
+
+            var xAxis = new Vector3d(1, 0, 0);
+            var yAxis = new Vector3d(0, 1, 0);
+            var zAxis = new Vector3d(0, 0, 1);
+
+            if (op.Axis1 != null)
+            {
+                var r = op.Axis1.DirectionRatios.ToArray();
+                if (r.Length >= 3) xAxis = new Vector3d(r[0], r[1], r[2]);
+            }
+            if (op.Axis2 != null)
+            {
+                var r = op.Axis2.DirectionRatios.ToArray();
+                if (r.Length >= 3) yAxis = new Vector3d(r[0], r[1], r[2]);
+            }
+            if (op.Axis3 != null)
+            {
+                var r = op.Axis3.DirectionRatios.ToArray();
+                if (r.Length >= 3) zAxis = new Vector3d(r[0], r[1], r[2]);
+            }
+
+            xAxis.Unitize();
+            yAxis.Unitize();
+            zAxis.Unitize();
+
+            return new Transform
+            {
+                M00 = xAxis.X, M01 = yAxis.X, M02 = zAxis.X, M03 = origin.X,
+                M10 = xAxis.Y, M11 = yAxis.Y, M12 = zAxis.Y, M13 = origin.Y,
+                M20 = xAxis.Z, M21 = yAxis.Z, M22 = zAxis.Z, M23 = origin.Z,
+                M30 = 0, M31 = 0, M32 = 0, M33 = 1
+            };
         }
 
         private Brep ConvertExtrudedAreaSolidToBrep(IIfcExtrudedAreaSolid extrusion, double scaleFactor, double tolerance)
@@ -344,9 +493,6 @@ namespace SERhinoIFC.Import
             var rotOnly = new Transform(placement);
             rotOnly.M03 = 0; rotOnly.M13 = 0; rotOnly.M23 = 0;
             extrudeDir.Transform(rotOnly);
-
-            // Create the extrusion as a Brep
-            var path = new LineCurve(Point3d.Origin, new Point3d(extrudeDir * depth));
 
             // Use Surface.CreateExtrusion to sweep the profile along the direction
             var surface = Surface.CreateExtrusion(profileCurve, extrudeDir * depth);
