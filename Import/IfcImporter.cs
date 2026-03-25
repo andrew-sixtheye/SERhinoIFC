@@ -474,28 +474,16 @@ namespace SERhinoIFC.Import
             if (profileCurve == null || !profileCurve.IsClosed)
                 return null;
 
-            // Extrusion direction and depth
+            // Extrusion vector in local coordinates (same as mesh path)
             var dir = extrusion.ExtrudedDirection;
-            double depth = extrusion.Depth * scaleFactor;
-            var extrudeDir = new Vector3d(
-                dir.DirectionRatios[0],
-                dir.DirectionRatios[1],
-                dir.DirectionRatios[2]);
-            extrudeDir.Unitize();
+            double depth = extrusion.Depth;
+            var extrudeVec = new Vector3d(
+                dir.DirectionRatios[0] * depth * scaleFactor,
+                dir.DirectionRatios[1] * depth * scaleFactor,
+                dir.DirectionRatios[2] * depth * scaleFactor);
 
-            // Local placement transform
-            Transform placement = GetPlacementTransform(extrusion.Position, scaleFactor);
-
-            // Transform the profile curve into world space
-            profileCurve.Transform(placement);
-
-            // Transform the extrusion direction by the placement rotation (no translation)
-            var rotOnly = new Transform(placement);
-            rotOnly.M03 = 0; rotOnly.M13 = 0; rotOnly.M23 = 0;
-            extrudeDir.Transform(rotOnly);
-
-            // Use Surface.CreateExtrusion to sweep the profile along the direction
-            var surface = Surface.CreateExtrusion(profileCurve, extrudeDir * depth);
+            // Build the extrusion in local coordinates first
+            var surface = Surface.CreateExtrusion(profileCurve, extrudeVec);
             if (surface == null) return null;
 
             var brep = surface.ToBrep();
@@ -506,6 +494,11 @@ namespace SERhinoIFC.Import
 
             if (!brep.IsValid)
                 brep.Repair(tolerance);
+
+            // Apply the local placement transform AFTER building the geometry
+            // (matches the mesh path which transforms the finished mesh)
+            Transform placement = GetPlacementTransform(extrusion.Position, scaleFactor);
+            brep.Transform(placement);
 
             return brep;
         }
