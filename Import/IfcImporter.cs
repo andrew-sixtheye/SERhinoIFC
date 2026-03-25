@@ -584,14 +584,30 @@ namespace SERhinoIFC.Import
             }
             // === END DEBUG ===
 
-            // Build the extrusion in local coordinates first
-            var surface = Surface.CreateExtrusion(profileCurve, extrudeVec);
-            if (surface == null) return null;
+            // Compute extrusion height along the direction axis
+            var extrudeDirUnit = new Vector3d(
+                dir.DirectionRatios[0],
+                dir.DirectionRatios[1],
+                dir.DirectionRatios[2]);
+            extrudeDirUnit.Unitize();
+            double height = depth * scaleFactor;
 
-            var brep = surface.ToBrep();
+            // The profile is in the XY plane. We need to orient it so that
+            // its plane normal aligns with the extrusion direction.
+            // Build a plane from the extrusion direction for the profile.
+            var profilePlane = new Plane(Point3d.Origin, extrudeDirUnit);
 
-            // Cap the open ends to make a closed polysurface
-            brep = brep.CapPlanarHoles(tolerance);
+            // Remap the profile curve from WorldXY to the profile plane
+            var remapTransform = Transform.PlaneToPlane(Plane.WorldXY, profilePlane);
+            var orientedCurve = profileCurve.DuplicateCurve();
+            orientedCurve.Transform(remapTransform);
+
+            // Create the extrusion — profile at start, extrudes along its normal by height
+            var rhinoExtrusion = Extrusion.Create(orientedCurve, height, true);
+            if (rhinoExtrusion == null)
+                return null;
+
+            var brep = rhinoExtrusion.ToBrep();
             if (brep == null) return null;
 
             if (!brep.IsValid)
