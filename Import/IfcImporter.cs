@@ -270,7 +270,7 @@ namespace SERhinoIFC.Import
                     {
                         try
                         {
-                            Brep brep = TryConvertRepItemToBrep(item, scaleFactor, tol);
+                            Brep brep = TryConvertRepItemToBrep(item, scaleFactor, tol, doc, worldPlacement);
 
                             if (brep != null)
                             {
@@ -304,10 +304,11 @@ namespace SERhinoIFC.Import
         /// Attempts to convert a representation item to a Brep.
         /// Handles IfcExtrudedAreaSolid, IfcFacetedBrep, and IfcBooleanResult (recursing into operands).
         /// </summary>
-        private Brep TryConvertRepItemToBrep(IIfcRepresentationItem item, double scaleFactor, double tolerance)
+        private Brep TryConvertRepItemToBrep(IIfcRepresentationItem item, double scaleFactor, double tolerance,
+            RhinoDoc debugDoc = null, Transform? debugWorldTransform = null)
         {
             if (item is IIfcExtrudedAreaSolid extrusion)
-                return ConvertExtrudedAreaSolidToBrep(extrusion, scaleFactor, tolerance);
+                return ConvertExtrudedAreaSolidToBrep(extrusion, scaleFactor, tolerance, debugDoc, debugWorldTransform);
 
             if (item is IIfcFacetedBrep fbrep)
                 return ConvertFacetedBrepToBrep(fbrep, scaleFactor, tolerance);
@@ -316,7 +317,7 @@ namespace SERhinoIFC.Import
             if (item is IIfcBooleanResult boolResult)
             {
                 if (boolResult.FirstOperand is IIfcRepresentationItem firstOp)
-                    return TryConvertRepItemToBrep(firstOp, scaleFactor, tolerance);
+                    return TryConvertRepItemToBrep(firstOp, scaleFactor, tolerance, debugDoc, debugWorldTransform);
             }
 
             // Handle mapped items (IfcMappedItem → IfcRepresentationMap)
@@ -327,7 +328,7 @@ namespace SERhinoIFC.Import
                 {
                     foreach (var subItem in mapSource.MappedRepresentation.Items)
                     {
-                        var brep = TryConvertRepItemToBrep(subItem, scaleFactor, tolerance);
+                        var brep = TryConvertRepItemToBrep(subItem, scaleFactor, tolerance, debugDoc, debugWorldTransform);
                         if (brep != null)
                         {
                             // Apply mapping target transform
@@ -467,7 +468,11 @@ namespace SERhinoIFC.Import
             };
         }
 
-        private Brep ConvertExtrudedAreaSolidToBrep(IIfcExtrudedAreaSolid extrusion, double scaleFactor, double tolerance)
+        // Debug: only emit diagnostic geometry for the first element
+        private bool _debugEmitted = false;
+
+        private Brep ConvertExtrudedAreaSolidToBrep(IIfcExtrudedAreaSolid extrusion, double scaleFactor, double tolerance,
+            RhinoDoc debugDoc = null, Transform? debugWorldTransform = null)
         {
             var profile = extrusion.SweptArea;
             var profileCurve = ExtractProfileCurve(profile, scaleFactor);
@@ -481,6 +486,103 @@ namespace SERhinoIFC.Import
                 dir.DirectionRatios[0] * depth * scaleFactor,
                 dir.DirectionRatios[1] * depth * scaleFactor,
                 dir.DirectionRatios[2] * depth * scaleFactor);
+
+            // Local placement transform
+            Transform placement = GetPlacementTransform(extrusion.Position, scaleFactor);
+
+            // === DEBUG: emit diagnostic geometry for the first element ===
+            if (debugDoc != null && !_debugEmitted)
+            {
+                _debugEmitted = true;
+                int debugBrepLayer = GetOrCreateLayer(debugDoc, "DEBUG::Brep");
+                int debugMeshLayer = GetOrCreateLayer(debugDoc, "DEBUG::Mesh");
+                int debugInfoLayer = GetOrCreateLayer(debugDoc, "DEBUG::Info");
+                Transform worldTransform = debugWorldTransform ?? Transform.Identity;
+
+                // --- BREP SIDE ---
+
+                // Profile curve at local origin (raw from ExtractProfileCurve)
+                var brepProfileLocal = profileCurve.DuplicateCurve();
+                AddDebugCurve(debugDoc, brepProfileLocal, "BREP_Profile_Local", debugBrepLayer, System.Drawing.Color.Blue);
+
+                // Profile after Position transform only
+                var brepProfilePos = profileCurve.DuplicateCurve();
+                brepProfilePos.Transform(placement);
+                AddDebugCurve(debugDoc, brepProfilePos, "BREP_Profile_AfterPosition", debugBrepLayer, System.Drawing.Color.Green);
+
+                // Profile in final world space (Position + ObjectPlacement)
+                var brepProfileWorld = profileCurve.DuplicateCurve();
+                brepProfileWorld.Transform(placement);
+                brepProfileWorld.Transform(worldTransform);
+                AddDebugCurve(debugDoc, brepProfileWorld, "BREP_Profile_World", debugBrepLayer, System.Drawing.Color.Red);
+
+                // Extrusion path in local space
+                AddDebugLine(debugDoc, Point3d.Origin, new Point3d(extrudeVec),
+                    "BREP_ExtrudePath_Local", debugBrepLayer, System.Drawing.Color.Cyan);
+
+                // Extrusion path after Position transform
+                var pathStartPos = new Point3d(0, 0, 0);
+                pathStartPos.Transform(placement);
+                var pathEndPos = new Point3d(extrudeVec);
+                pathEndPos.Transform(placement);
+                AddDebugLine(debugDoc, pathStartPos, pathEndPos,
+                    "BREP_ExtrudePath_AfterPosition", debugBrepLayer, System.Drawing.Color.Magenta);
+
+                // --- MESH SIDE (for comparison) ---
+
+                // Build mesh version with same transforms
+                var polyline = ExtractProfilePolyline(profile, scaleFactor);
+                if (polyline != null && polyline.Count >= 3)
+                {
+                    // Mesh profile polyline at local origin
+                    var meshPts = new List<Point3d>(polyline);
+                    meshPts.Add(meshPts[0]); // close it
+                    AddDebugCurve(debugDoc, new PolylineCurve(meshPts), "MESH_Profile_Local", debugMeshLayer, System.Drawing.Color.Blue);
+
+                    // Mesh profile after Position transform
+                    var meshPtsPos = meshPts.Select(p => { var q = p; q.Transform(placement); return q; }).ToList();
+                    AddDebugCurve(debugDoc, new PolylineCurve(meshPtsPos), "MESH_Profile_AfterPosition", debugMeshLayer, System.Drawing.Color.Green);
+
+                    // Mesh profile in final world space
+                    var meshPtsWorld = meshPtsPos.Select(p => { var q = p; q.Transform(worldTransform); return q; }).ToList();
+                    AddDebugCurve(debugDoc, new PolylineCurve(meshPtsWorld), "MESH_Profile_World", debugMeshLayer, System.Drawing.Color.Red);
+
+                    // Mesh extrude path in local space
+                    AddDebugLine(debugDoc, Point3d.Origin, new Point3d(extrudeVec),
+                        "MESH_ExtrudePath_Local", debugMeshLayer, System.Drawing.Color.Cyan);
+
+                    // Full mesh geometry in world space for overlay comparison
+                    var debugMesh = ConvertExtrudedAreaSolid(extrusion, scaleFactor);
+                    if (debugMesh != null)
+                    {
+                        debugMesh.Transform(worldTransform);
+                        var meshAttr = new ObjectAttributes { Name = "MESH_FullGeometry", LayerIndex = debugMeshLayer };
+                        meshAttr.ObjectColor = System.Drawing.Color.Orange;
+                        meshAttr.ColorSource = ObjectColorSource.ColorFromObject;
+                        debugDoc.Objects.AddMesh(debugMesh, meshAttr);
+                    }
+                }
+
+                // --- LOG ---
+                RhinoApp.WriteLine($"SERhinoIFC DEBUG: Extrusion #{extrusion.EntityLabel}");
+                RhinoApp.WriteLine($"  Profile type: {profile.GetType().Name}");
+                RhinoApp.WriteLine($"  ExtrudeVec (local): ({extrudeVec.X:F4}, {extrudeVec.Y:F4}, {extrudeVec.Z:F4})");
+                RhinoApp.WriteLine($"  Position transform:");
+                RhinoApp.WriteLine($"    Origin: ({placement.M03:F4}, {placement.M13:F4}, {placement.M23:F4})");
+                RhinoApp.WriteLine($"    X-axis: ({placement.M00:F4}, {placement.M10:F4}, {placement.M20:F4})");
+                RhinoApp.WriteLine($"    Y-axis: ({placement.M01:F4}, {placement.M11:F4}, {placement.M21:F4})");
+                RhinoApp.WriteLine($"    Z-axis: ({placement.M02:F4}, {placement.M12:F4}, {placement.M22:F4})");
+                RhinoApp.WriteLine($"  World transform:");
+                RhinoApp.WriteLine($"    Origin: ({worldTransform.M03:F4}, {worldTransform.M13:F4}, {worldTransform.M23:F4})");
+                RhinoApp.WriteLine($"    X-axis: ({worldTransform.M00:F4}, {worldTransform.M10:F4}, {worldTransform.M20:F4})");
+                RhinoApp.WriteLine($"    Y-axis: ({worldTransform.M01:F4}, {worldTransform.M11:F4}, {worldTransform.M21:F4})");
+                RhinoApp.WriteLine($"    Z-axis: ({worldTransform.M02:F4}, {worldTransform.M12:F4}, {worldTransform.M22:F4})");
+                RhinoApp.WriteLine($"  Brep profile curve start: {profileCurve.PointAtStart}");
+                RhinoApp.WriteLine($"  Brep profile bbox center: {profileCurve.GetBoundingBox(true).Center}");
+                if (polyline != null)
+                    RhinoApp.WriteLine($"  Mesh profile point[0]: {polyline[0]}");
+            }
+            // === END DEBUG ===
 
             // Build the extrusion in local coordinates first
             var surface = Surface.CreateExtrusion(profileCurve, extrudeVec);
@@ -496,11 +598,25 @@ namespace SERhinoIFC.Import
                 brep.Repair(tolerance);
 
             // Apply the local placement transform AFTER building the geometry
-            // (matches the mesh path which transforms the finished mesh)
-            Transform placement = GetPlacementTransform(extrusion.Position, scaleFactor);
             brep.Transform(placement);
 
             return brep;
+        }
+
+        private void AddDebugCurve(RhinoDoc doc, Curve curve, string name, int layerIndex, System.Drawing.Color color)
+        {
+            var attr = new ObjectAttributes { Name = name, LayerIndex = layerIndex };
+            attr.ObjectColor = color;
+            attr.ColorSource = ObjectColorSource.ColorFromObject;
+            doc.Objects.AddCurve(curve, attr);
+        }
+
+        private void AddDebugLine(RhinoDoc doc, Point3d start, Point3d end, string name, int layerIndex, System.Drawing.Color color)
+        {
+            var attr = new ObjectAttributes { Name = name, LayerIndex = layerIndex };
+            attr.ObjectColor = color;
+            attr.ColorSource = ObjectColorSource.ColorFromObject;
+            doc.Objects.AddLine(start, end, attr);
         }
 
         private Brep ConvertFacetedBrepToBrep(IIfcFacetedBrep ifcBrep, double scaleFactor, double tolerance)
