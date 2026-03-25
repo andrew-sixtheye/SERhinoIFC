@@ -349,6 +349,136 @@ namespace SERhinoIFC.Import
                 return points;
             }
 
+            // Handle IfcCShapeProfileDef (cold-formed steel C-channel)
+            var cProfile = profile as IIfcCShapeProfileDef;
+            if (cProfile != null)
+            {
+                double d = cProfile.Depth * scaleFactor;      // web height
+                double w = cProfile.Width * scaleFactor;       // flange width
+                double t = cProfile.WallThickness * scaleFactor;
+                double g = cProfile.Girth * scaleFactor;       // lip length
+
+                double halfD = d / 2.0;
+
+                // Outer perimeter CCW starting at bottom-right of web, going up
+                // The C-shape opens to the left: web on the right, flanges extend left, lips turn inward
+                //
+                //   (5)───(4)          (3)───(2)
+                //    |                        |
+                //   (6)    (9)        (10)   (1)
+                //           |          |
+                //          (8)──────(11)
+                //           |          |
+                //          (7)    (12) (0)
+                //    |                        |
+                //  (15)  (14)        (13)  (23=0 wrap)
+                //
+                // Points traced as outer boundary, then inner boundary
+
+                var points = new List<Point3d>
+                {
+                    // Outer path (CCW from bottom-right)
+                    new Point3d(0,      -halfD,         0),  // 0: bottom-right corner (web base)
+                    new Point3d(0,       halfD,         0),  // 1: top-right corner (web top)
+                    new Point3d(-w,      halfD,         0),  // 2: top flange end
+                    new Point3d(-w,      halfD - g,     0),  // 3: top lip end
+                    new Point3d(-w + t,  halfD - g,     0),  // 4: top lip inner
+                    new Point3d(-w + t,  halfD - t,     0),  // 5: top flange inner
+                    new Point3d(-t,      halfD - t,     0),  // 6: web inner top
+                    new Point3d(-t,     -halfD + t,     0),  // 7: web inner bottom
+                    new Point3d(-w + t, -halfD + t,     0),  // 8: bottom flange inner
+                    new Point3d(-w + t, -halfD + g,     0),  // 9: bottom lip inner
+                    new Point3d(-w,     -halfD + g,     0),  // 10: bottom lip end
+                    new Point3d(-w,     -halfD,         0),  // 11: bottom flange end
+                };
+
+                return points;
+            }
+
+            // Handle IfcUShapeProfileDef
+            var uProfile = profile as IIfcUShapeProfileDef;
+            if (uProfile != null)
+            {
+                double d = uProfile.Depth * scaleFactor;
+                double w = uProfile.FlangeWidth * scaleFactor;
+                double tw = uProfile.WebThickness * scaleFactor;
+                double tf = uProfile.FlangeThickness * scaleFactor;
+
+                double halfD = d / 2.0;
+                double halfW = w / 2.0;
+
+                // U-shape: two flanges and a web at the bottom, opening upward
+                var points = new List<Point3d>
+                {
+                    new Point3d(-halfW,      -halfD,       0),
+                    new Point3d( halfW,      -halfD,       0),
+                    new Point3d( halfW,       halfD,       0),
+                    new Point3d( halfW - tw,  halfD,       0),
+                    new Point3d( halfW - tw, -halfD + tf,  0),
+                    new Point3d(-halfW + tw, -halfD + tf,  0),
+                    new Point3d(-halfW + tw,  halfD,       0),
+                    new Point3d(-halfW,       halfD,       0),
+                };
+
+                return points;
+            }
+
+            // Handle IfcLShapeProfileDef
+            var lProfile = profile as IIfcLShapeProfileDef;
+            if (lProfile != null)
+            {
+                double d = lProfile.Depth * scaleFactor;
+                double w = (lProfile.Width ?? lProfile.Depth) * scaleFactor;
+                double t = lProfile.Thickness * scaleFactor;
+
+                double halfD = d / 2.0;
+                double halfW = w / 2.0;
+
+                var points = new List<Point3d>
+                {
+                    new Point3d(-halfW,     -halfD,     0),
+                    new Point3d( halfW,     -halfD,     0),
+                    new Point3d( halfW,     -halfD + t, 0),
+                    new Point3d(-halfW + t, -halfD + t, 0),
+                    new Point3d(-halfW + t,  halfD,     0),
+                    new Point3d(-halfW,      halfD,     0),
+                };
+
+                return points;
+            }
+
+            // Handle IfcIShapeProfileDef
+            var iProfile = profile as IIfcIShapeProfileDef;
+            if (iProfile != null)
+            {
+                double d = iProfile.OverallDepth * scaleFactor;
+                double w = iProfile.OverallWidth * scaleFactor;
+                double tw = iProfile.WebThickness * scaleFactor;
+                double tf = iProfile.FlangeThickness * scaleFactor;
+
+                double halfD = d / 2.0;
+                double halfW = w / 2.0;
+                double halfTw = tw / 2.0;
+
+                var points = new List<Point3d>
+                {
+                    new Point3d(-halfW,   -halfD,       0),
+                    new Point3d( halfW,   -halfD,       0),
+                    new Point3d( halfW,   -halfD + tf,  0),
+                    new Point3d( halfTw,  -halfD + tf,  0),
+                    new Point3d( halfTw,   halfD - tf,  0),
+                    new Point3d( halfW,    halfD - tf,  0),
+                    new Point3d( halfW,    halfD,       0),
+                    new Point3d(-halfW,    halfD,       0),
+                    new Point3d(-halfW,    halfD - tf,  0),
+                    new Point3d(-halfTw,   halfD - tf,  0),
+                    new Point3d(-halfTw,  -halfD + tf,  0),
+                    new Point3d(-halfW,   -halfD + tf,  0),
+                };
+
+                return points;
+            }
+
             RhinoApp.WriteLine($"SERhinoIFC: Unsupported profile type: {profile.GetType().Name}");
             return null;
         }
