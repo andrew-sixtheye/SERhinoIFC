@@ -38,7 +38,8 @@ namespace SERhinoIFC.Commands
                     return Result.Cancel;
 
                 var selectedUnit = dialog.SelectedIfcUnit;
-                int count = importer.Import(filePath, doc, selectedUnit);
+                bool useBrep = dialog.GeometryMode == ImportGeometryMode.Brep;
+                int count = importer.Import(filePath, doc, selectedUnit, useBrep);
                 RhinoApp.WriteLine($"Imported {count} objects from {System.IO.Path.GetFileName(filePath)}");
                 doc.Views.Redraw();
                 return Result.Success;

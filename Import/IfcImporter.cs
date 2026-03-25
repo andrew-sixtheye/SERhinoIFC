@@ -26,7 +26,7 @@ namespace SERhinoIFC.Import
             }
         }
 
-        public int Import(string filePath, RhinoDoc doc, IfcUnitInfo ifcUnitOverride = null)
+        public int Import(string filePath, RhinoDoc doc, IfcUnitInfo ifcUnitOverride = null, bool useBrep = false)
         {
             int objectCount = 0;
 
@@ -41,17 +41,30 @@ namespace SERhinoIFC.Import
                 // Build lookup: element -> storey name
                 var storeyLookup = BuildStoreyLookup(model);
 
-                // Attempt xBIM geometry engine tessellation
-                objectCount = ImportViaTessellation(model, doc, scaleFactor, storeyLookup);
-
-                // Fallback: if tessellation produced nothing, read geometry directly
-                if (objectCount == 0)
+                if (useBrep)
                 {
-                    RhinoApp.WriteLine("SERhinoIFC: xBIM tessellation returned 0 shapes. Attempting direct geometry fallback...");
-                    objectCount = ImportDirectFallback(model, doc, scaleFactor, storeyLookup);
+                    // Brep mode: read structured geometry directly (no tessellation)
+                    objectCount = ImportAsBrep(model, doc, scaleFactor, storeyLookup);
 
                     if (objectCount == 0)
-                        RhinoApp.WriteLine("SERhinoIFC: Direct geometry fallback also produced 0 objects.");
+                    {
+                        RhinoApp.WriteLine("SERhinoIFC: Brep import produced 0 objects. Falling back to tessellation...");
+                        objectCount = ImportViaTessellation(model, doc, scaleFactor, storeyLookup);
+                    }
+                }
+                else
+                {
+                    // Mesh mode: use xBIM tessellation (original behavior)
+                    objectCount = ImportViaTessellation(model, doc, scaleFactor, storeyLookup);
+
+                    if (objectCount == 0)
+                    {
+                        RhinoApp.WriteLine("SERhinoIFC: xBIM tessellation returned 0 shapes. Attempting direct geometry fallback...");
+                        objectCount = ImportDirectFallback(model, doc, scaleFactor, storeyLookup);
+
+                        if (objectCount == 0)
+                            RhinoApp.WriteLine("SERhinoIFC: Direct geometry fallback also produced 0 objects.");
+                    }
                 }
             }
 
@@ -227,6 +240,250 @@ namespace SERhinoIFC.Import
 
             RhinoApp.WriteLine($"SERhinoIFC: Direct fallback imported {objectCount} objects.");
             return objectCount;
+        }
+
+        private int ImportAsBrep(IModel model, RhinoDoc doc, double scaleFactor,
+            Dictionary<int, string> storeyLookup)
+        {
+            int objectCount = 0;
+            double tol = doc.ModelAbsoluteTolerance;
+
+            // Brep path 1: IfcExtrudedAreaSolid → clean extrusion Breps
+            var extrusions = model.Instances.OfType<IIfcExtrudedAreaSolid>().ToList();
+            RhinoApp.WriteLine($"SERhinoIFC: Brep import — {extrusions.Count} extrusions found.");
+            foreach (var extrusion in extrusions)
+            {
+                try
+                {
+                    var brep = ConvertExtrudedAreaSolidToBrep(extrusion, scaleFactor, tol);
+                    if (brep == null)
+                    {
+                        RhinoApp.WriteLine($"SERhinoIFC: ExtrudedAreaSolid #{extrusion.EntityLabel} — Brep conversion failed, trying mesh fallback.");
+                        var mesh = ConvertExtrudedAreaSolid(extrusion, scaleFactor);
+                        if (mesh != null && mesh.Vertices.Count > 0)
+                        {
+                            var product = FindOwningProduct(model, extrusion);
+                            if (product != null)
+                                objectCount += AddMeshToDoc(doc, mesh, product, storeyLookup);
+                        }
+                        continue;
+                    }
+
+                    var owner = FindOwningProduct(model, extrusion);
+                    if (owner != null)
+                        objectCount += AddBrepToDoc(doc, brep, owner, storeyLookup);
+                    else
+                        objectCount += AddOrphanBrepToDoc(doc, brep, $"Extrusion_{extrusion.EntityLabel}");
+                }
+                catch (Exception ex)
+                {
+                    RhinoApp.WriteLine($"SERhinoIFC: Brep extrusion #{extrusion.EntityLabel} failed: {ex.Message}");
+                }
+            }
+
+            // Brep path 2: IfcFacetedBrep → joined planar Breps
+            var facetedBreps = model.Instances.OfType<IIfcFacetedBrep>().ToList();
+            RhinoApp.WriteLine($"SERhinoIFC: Brep import — {facetedBreps.Count} faceted breps found.");
+            foreach (var fbrep in facetedBreps)
+            {
+                try
+                {
+                    var brep = ConvertFacetedBrepToBrep(fbrep, scaleFactor, tol);
+                    if (brep == null)
+                    {
+                        RhinoApp.WriteLine($"SERhinoIFC: FacetedBrep #{fbrep.EntityLabel} — Brep conversion failed, trying mesh fallback.");
+                        var mesh = ConvertFacetedBrep(fbrep, scaleFactor);
+                        if (mesh != null && mesh.Vertices.Count > 0)
+                        {
+                            var product = FindOwningProduct(model, fbrep);
+                            if (product != null)
+                                objectCount += AddMeshToDoc(doc, mesh, product, storeyLookup);
+                        }
+                        continue;
+                    }
+
+                    var owner = FindOwningProduct(model, fbrep);
+                    if (owner != null)
+                        objectCount += AddBrepToDoc(doc, brep, owner, storeyLookup);
+                    else
+                        objectCount += AddOrphanBrepToDoc(doc, brep, $"FacetedBrep_{fbrep.EntityLabel}");
+                }
+                catch (Exception ex)
+                {
+                    RhinoApp.WriteLine($"SERhinoIFC: Brep faceted #{fbrep.EntityLabel} failed: {ex.Message}");
+                }
+            }
+
+            RhinoApp.WriteLine($"SERhinoIFC: Brep import completed — {objectCount} objects.");
+            return objectCount;
+        }
+
+        private Brep ConvertExtrudedAreaSolidToBrep(IIfcExtrudedAreaSolid extrusion, double scaleFactor, double tolerance)
+        {
+            var profile = extrusion.SweptArea;
+            var profileCurve = ExtractProfileCurve(profile, scaleFactor);
+            if (profileCurve == null || !profileCurve.IsClosed)
+                return null;
+
+            // Extrusion direction and depth
+            var dir = extrusion.ExtrudedDirection;
+            double depth = extrusion.Depth * scaleFactor;
+            var extrudeDir = new Vector3d(
+                dir.DirectionRatios[0],
+                dir.DirectionRatios[1],
+                dir.DirectionRatios[2]);
+            extrudeDir.Unitize();
+
+            // Local placement transform
+            Transform placement = GetPlacementTransform(extrusion.Position, scaleFactor);
+
+            // Transform the profile curve into world space
+            profileCurve.Transform(placement);
+
+            // Transform the extrusion direction by the placement rotation (no translation)
+            var rotOnly = new Transform(placement);
+            rotOnly.M03 = 0; rotOnly.M13 = 0; rotOnly.M23 = 0;
+            extrudeDir.Transform(rotOnly);
+
+            // Create the extrusion as a Brep
+            var path = new LineCurve(Point3d.Origin, new Point3d(extrudeDir * depth));
+
+            // Use Surface.CreateExtrusion to sweep the profile along the direction
+            var surface = Surface.CreateExtrusion(profileCurve, extrudeDir * depth);
+            if (surface == null) return null;
+
+            var brep = surface.ToBrep();
+
+            // Cap the open ends to make a closed polysurface
+            brep = brep.CapPlanarHoles(tolerance);
+            if (brep == null) return null;
+
+            if (!brep.IsValid)
+                brep.Repair(tolerance);
+
+            return brep;
+        }
+
+        private Brep ConvertFacetedBrepToBrep(IIfcFacetedBrep ifcBrep, double scaleFactor, double tolerance)
+        {
+            var shell = ifcBrep.Outer;
+            if (shell == null) return null;
+
+            var faceBreps = new List<Brep>();
+
+            foreach (var face in shell.CfsFaces)
+            {
+                foreach (var bound in face.Bounds)
+                {
+                    var loop = bound.Bound as IIfcPolyLoop;
+                    if (loop == null) continue;
+
+                    var polygon = loop.Polygon.ToList();
+                    if (polygon.Count < 3) continue;
+
+                    // Build closed polyline from face vertices
+                    var pts = new List<Point3d>();
+                    foreach (var pt in polygon)
+                    {
+                        var coords = pt.Coordinates.ToArray();
+                        double x = (coords.Length > 0 ? coords[0] : 0) * scaleFactor;
+                        double y = (coords.Length > 1 ? coords[1] : 0) * scaleFactor;
+                        double z = (coords.Length > 2 ? coords[2] : 0) * scaleFactor;
+                        pts.Add(new Point3d(x, y, z));
+                    }
+
+                    // Close the polyline
+                    if (pts[0].DistanceTo(pts[pts.Count - 1]) > tolerance)
+                        pts.Add(pts[0]);
+
+                    if (pts.Count < 4) continue; // need at least 3 unique + closing
+
+                    var curve = new PolylineCurve(pts);
+                    var planarBreps = Brep.CreatePlanarBreps(curve, tolerance);
+                    if (planarBreps != null)
+                    {
+                        foreach (var pb in planarBreps)
+                            faceBreps.Add(pb);
+                    }
+                }
+            }
+
+            if (faceBreps.Count == 0) return null;
+
+            // Join all planar faces into a closed polysurface
+            var joined = Brep.JoinBreps(faceBreps, tolerance);
+            if (joined == null || joined.Length == 0)
+                return null;
+
+            // Return the largest joined brep (should be the closed solid)
+            Brep result = joined[0];
+            for (int i = 1; i < joined.Length; i++)
+            {
+                if (joined[i].Faces.Count > result.Faces.Count)
+                    result = joined[i];
+            }
+
+            return result;
+        }
+
+        private Curve ExtractProfileCurve(IIfcProfileDef profile, double scaleFactor)
+        {
+            // For circle profiles, return a true circle curve
+            var circProfile = profile as IIfcCircleProfileDef;
+            if (circProfile != null)
+            {
+                double radius = circProfile.Radius * scaleFactor;
+                var circle = new Circle(Plane.WorldXY, radius);
+                return circle.ToNurbsCurve();
+            }
+
+            // For all other profiles, use the existing point extraction and make a polyline curve
+            var points = ExtractProfilePolyline(profile, scaleFactor);
+            if (points == null || points.Count < 3)
+                return null;
+
+            // Close the polyline
+            points.Add(points[0]);
+            return new PolylineCurve(points);
+        }
+
+        private int AddBrepToDoc(RhinoDoc doc, Brep brep, IIfcProduct element,
+            Dictionary<int, string> storeyLookup)
+        {
+            string elementName = element.Name?.ToString() ?? element.GetType().Name;
+            string className = element.ExpressType.ExpressName;
+            string storeyName = storeyLookup.ContainsKey(element.EntityLabel)
+                ? storeyLookup[element.EntityLabel]
+                : "Unsorted";
+
+            string layerPath = $"{storeyName}::{className}";
+            int layerIndex = GetOrCreateLayer(doc, layerPath);
+
+            var attributes = new ObjectAttributes
+            {
+                Name = elementName,
+                LayerIndex = layerIndex
+            };
+
+            SetAllMetadata(attributes, element);
+
+            doc.Objects.AddBrep(brep, attributes);
+            return 1;
+        }
+
+        private int AddOrphanBrepToDoc(RhinoDoc doc, Brep brep, string name)
+        {
+            string layerPath = "Unsorted::OrphanGeometry";
+            int layerIndex = GetOrCreateLayer(doc, layerPath);
+
+            var attributes = new ObjectAttributes
+            {
+                Name = name,
+                LayerIndex = layerIndex
+            };
+
+            doc.Objects.AddBrep(brep, attributes);
+            return 1;
         }
 
         private Mesh ConvertFacetedBrep(IIfcFacetedBrep brep, double scaleFactor)

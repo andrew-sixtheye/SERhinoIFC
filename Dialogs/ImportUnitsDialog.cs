@@ -6,15 +6,27 @@ using Font = Eto.Drawing.Font;
 
 namespace SERhinoIFC.Dialogs
 {
+    public enum ImportGeometryMode
+    {
+        Brep,
+        Mesh
+    }
+
     public class ImportUnitsDialog : Dialog<bool>
     {
         private readonly DropDown _ifcUnitOverride;
+        private readonly DropDown _geometryMode;
         private readonly IfcUnitInfo _detectedUnit;
 
         /// <summary>
         /// The final IFC unit info to use for import (detected or overridden).
         /// </summary>
         public IfcUnitInfo SelectedIfcUnit { get; private set; }
+
+        /// <summary>
+        /// The geometry type to create in Rhino.
+        /// </summary>
+        public ImportGeometryMode GeometryMode { get; private set; }
 
         private static readonly (string Name, double MetersPerUnit)[] UnitOptions =
         {
@@ -30,8 +42,9 @@ namespace SERhinoIFC.Dialogs
         {
             _detectedUnit = detectedUnit;
             SelectedIfcUnit = detectedUnit;
+            GeometryMode = ImportGeometryMode.Brep;
 
-            Title = "IFC Import — Unit Check";
+            Title = "IFC Import Options";
             Padding = new Padding(20);
             MinimumSize = new Size(420, 0);
             Resizable = false;
@@ -51,7 +64,7 @@ namespace SERhinoIFC.Dialogs
                 Font = new Font(SystemFont.Bold, 12)
             };
 
-            // Override dropdown
+            // Unit override dropdown
             _ifcUnitOverride = new DropDown();
             int selectedIndex = 0;
             for (int i = 0; i < UnitOptions.Length; i++)
@@ -61,6 +74,12 @@ namespace SERhinoIFC.Dialogs
                     selectedIndex = i;
             }
             _ifcUnitOverride.SelectedIndex = selectedIndex;
+
+            // Geometry mode dropdown
+            _geometryMode = new DropDown();
+            _geometryMode.Items.Add("Polysurface (Brep)");
+            _geometryMode.Items.Add("Mesh");
+            _geometryMode.SelectedIndex = 0;
 
             // Buttons
             var importButton = new Button { Text = "Import" };
@@ -96,11 +115,15 @@ namespace SERhinoIFC.Dialogs
                                 new Label { Text = "Import As:", VerticalAlignment = VerticalAlignment.Center },
                                 _ifcUnitOverride
                             ),
+                            new TableRow(
+                                new Label { Text = "Geometry Type:", VerticalAlignment = VerticalAlignment.Center },
+                                _geometryMode
+                            ),
                         }
                     },
                     new Label
                     {
-                        Text = "Change \"Import As\" only if the detected unit is wrong.",
+                        Text = "Change \"Import As\" only if the detected unit is wrong.\nBrep creates clean polysurfaces; Mesh is faster for large models.",
                         TextColor = Colors.Gray,
                         Font = new Font(SystemFont.Default, 9)
                     },
@@ -126,6 +149,10 @@ namespace SERhinoIFC.Dialogs
                 UnitName = chosen.Name,
                 MetersPerUnit = chosen.MetersPerUnit
             };
+
+            GeometryMode = _geometryMode.SelectedIndex == 0
+                ? ImportGeometryMode.Brep
+                : ImportGeometryMode.Mesh;
 
             Result = true;
             Close();
