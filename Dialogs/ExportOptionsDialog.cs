@@ -8,11 +8,13 @@ namespace SERhinoIFC.Dialogs
     public class ExportOptionsDialog : Dialog<ExportOptions>
     {
         private readonly DropDown _exportModeDropDown;
+        private readonly DropDown _unitsDropDown;
+        private readonly TextBox _toleranceTextBox;
         private readonly DropDown _ifcSchemaDropDown;
         private readonly TextBox _authorTextBox;
         private readonly TextBox _organizationTextBox;
 
-        public ExportOptionsDialog()
+        public ExportOptionsDialog(Rhino.UnitSystem rhinoUnits, double rhinoTolerance)
         {
             Title = "IFC Export Options";
             Padding = new Padding(15);
@@ -24,6 +26,28 @@ namespace SERhinoIFC.Dialogs
             _exportModeDropDown.Items.Add("General IFC (Brep)");
             _exportModeDropDown.Items.Add("SE-Cbot (Solid)");
             _exportModeDropDown.SelectedIndex = 0;
+
+            // Units
+            _unitsDropDown = new DropDown();
+            _unitsDropDown.Items.Add("Millimeters");
+            _unitsDropDown.Items.Add("Centimeters");
+            _unitsDropDown.Items.Add("Meters");
+            _unitsDropDown.Items.Add("Inches");
+            _unitsDropDown.Items.Add("Feet");
+
+            // Default to match Rhino doc units
+            switch (rhinoUnits)
+            {
+                case Rhino.UnitSystem.Millimeters: _unitsDropDown.SelectedIndex = 0; break;
+                case Rhino.UnitSystem.Centimeters: _unitsDropDown.SelectedIndex = 1; break;
+                case Rhino.UnitSystem.Meters:      _unitsDropDown.SelectedIndex = 2; break;
+                case Rhino.UnitSystem.Inches:      _unitsDropDown.SelectedIndex = 3; break;
+                case Rhino.UnitSystem.Feet:        _unitsDropDown.SelectedIndex = 4; break;
+                default:                           _unitsDropDown.SelectedIndex = 2; break; // meters fallback
+            }
+
+            // Tolerance
+            _toleranceTextBox = new TextBox { Text = rhinoTolerance.ToString("G") };
 
             // IFC Schema
             _ifcSchemaDropDown = new DropDown();
@@ -60,6 +84,14 @@ namespace SERhinoIFC.Dialogs
                     new TableRow(
                         new Label { Text = "Export Mode", VerticalAlignment = VerticalAlignment.Center },
                         _exportModeDropDown
+                    ),
+                    new TableRow(
+                        new Label { Text = "IFC Units", VerticalAlignment = VerticalAlignment.Center },
+                        _unitsDropDown
+                    ),
+                    new TableRow(
+                        new Label { Text = "Tolerance", VerticalAlignment = VerticalAlignment.Center },
+                        _toleranceTextBox
                     ),
                     new TableRow(
                         new Label { Text = "IFC Schema", VerticalAlignment = VerticalAlignment.Center },
@@ -99,9 +131,26 @@ namespace SERhinoIFC.Dialogs
 
         private void OnOkClick(object sender, EventArgs e)
         {
+            ExportUnitSystem units;
+            switch (_unitsDropDown.SelectedIndex)
+            {
+                case 0: units = ExportUnitSystem.Millimeters; break;
+                case 1: units = ExportUnitSystem.Centimeters; break;
+                case 2: units = ExportUnitSystem.Meters; break;
+                case 3: units = ExportUnitSystem.Inches; break;
+                case 4: units = ExportUnitSystem.Feet; break;
+                default: units = ExportUnitSystem.Meters; break;
+            }
+
+            double tolerance = 0.001;
+            double.TryParse(_toleranceTextBox.Text, System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture, out tolerance);
+
             Result = new ExportOptions
             {
                 Mode = _exportModeDropDown.SelectedIndex == 0 ? ExportMode.General : ExportMode.FrameCAD,
+                Units = units,
+                Tolerance = tolerance,
                 IfcSchema = _ifcSchemaDropDown.SelectedValue?.ToString() ?? "IFC2x3",
                 Author = _authorTextBox.Text,
                 Organization = _organizationTextBox.Text

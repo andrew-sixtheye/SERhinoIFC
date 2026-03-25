@@ -22,7 +22,7 @@ namespace SERhinoIFC.Commands
             }
 
             // Show export options dialog
-            var dialog = new ExportOptionsDialog();
+            var dialog = new ExportOptionsDialog(doc.ModelUnitSystem, doc.ModelAbsoluteTolerance);
             var options = dialog.ShowModal(Rhino.UI.RhinoEtoApp.MainWindow);
             if (options == null)
                 return Result.Cancel;

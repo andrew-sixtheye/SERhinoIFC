@@ -26,7 +26,8 @@ namespace SERhinoIFC.Export
         public int Export(RhinoObject[] objects, string filePath, ExportOptions options, RhinoDoc doc)
         {
             int exportedCount = 0;
-            double scaleFactor = RhinoMath.UnitScale(doc.ModelUnitSystem, UnitSystem.Millimeters);
+            var targetUnits = ExportUnitHelper.ToRhinoUnitSystem(options.Units);
+            double scaleFactor = RhinoMath.UnitScale(doc.ModelUnitSystem, targetUnits);
             var metadataWriter = new IfcMetadataWriter();
 
             var credentials = new XbimEditorCredentials
@@ -52,12 +53,7 @@ namespace SERhinoIFC.Export
                     });
 
                     var unitAssignment = model.Instances.New<IfcUnitAssignment>();
-                    unitAssignment.Units.Add(model.Instances.New<IfcSIUnit>(u =>
-                    {
-                        u.UnitType = IfcUnitEnum.LENGTHUNIT;
-                        u.Name = IfcSIUnitName.METRE;
-                        u.Prefix = IfcSIPrefix.MILLI;
-                    }));
+                    ExportUnitHelper.CreateLengthUnit(model, unitAssignment, options.Units);
                     unitAssignment.Units.Add(model.Instances.New<IfcSIUnit>(u =>
                     {
                         u.UnitType = IfcUnitEnum.AREAUNIT;
@@ -75,7 +71,7 @@ namespace SERhinoIFC.Export
                     {
                         c.ContextType = "Model";
                         c.CoordinateSpaceDimension = 3;
-                        c.Precision = 1e-5;
+                        c.Precision = options.Tolerance;
                         c.WorldCoordinateSystem = model.Instances.New<IfcAxis2Placement3D>(a =>
                         {
                             a.Location = model.Instances.New<IfcCartesianPoint>(p2 =>

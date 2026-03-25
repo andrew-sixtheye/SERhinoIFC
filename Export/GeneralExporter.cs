@@ -25,7 +25,8 @@ namespace SERhinoIFC.Export
         public int Export(RhinoObject[] objects, string filePath, ExportOptions options, RhinoDoc doc)
         {
             int exportedCount = 0;
-            double scaleFactor = RhinoMath.UnitScale(doc.ModelUnitSystem, UnitSystem.Meters);
+            var targetUnits = ExportUnitHelper.ToRhinoUnitSystem(options.Units);
+            double scaleFactor = RhinoMath.UnitScale(doc.ModelUnitSystem, targetUnits);
             var metadataWriter = new IfcMetadataWriter();
 
             var credentials = new XbimEditorCredentials
@@ -50,11 +51,7 @@ namespace SERhinoIFC.Export
                     });
 
                     var unitAssignment = model.Instances.New<IfcUnitAssignment>();
-                    unitAssignment.Units.Add(model.Instances.New<IfcSIUnit>(u =>
-                    {
-                        u.UnitType = IfcUnitEnum.LENGTHUNIT;
-                        u.Name = IfcSIUnitName.METRE;
-                    }));
+                    ExportUnitHelper.CreateLengthUnit(model, unitAssignment, options.Units);
                     unitAssignment.Units.Add(model.Instances.New<IfcSIUnit>(u =>
                     {
                         u.UnitType = IfcUnitEnum.AREAUNIT;
@@ -72,7 +69,7 @@ namespace SERhinoIFC.Export
                     {
                         c.ContextType = "Model";
                         c.CoordinateSpaceDimension = 3;
-                        c.Precision = 1e-5;
+                        c.Precision = options.Tolerance;
                         c.WorldCoordinateSystem = model.Instances.New<IfcAxis2Placement3D>(a =>
                         {
                             a.Location = model.Instances.New<IfcCartesianPoint>(p2 =>
@@ -136,51 +133,58 @@ namespace SERhinoIFC.Export
 
                         foreach (var rhinoObj in kvp.Value)
                         {
-                            var mesh = GeometryHelper.GetTriangulatedMesh(rhinoObj.Geometry);
-                            if (mesh == null || mesh.Vertices.Count < 3)
+                            try
                             {
-                                RhinoApp.WriteLine($"Skipping '{rhinoObj.Name}': could not generate mesh.");
-                                continue;
-                            }
-
-                            // Create the IFC element from user text metadata
-                            var element = metadataWriter.CreateElement(model, rhinoObj, doc);
-                            if (element == null) continue;
-
-                            // Apply all metadata (properties, quantities, materials)
-                            metadataWriter.ApplyMetadata(model, element, rhinoObj);
-
-                            // Create geometry as FacetedBrep
-                            var brep = CreateFacetedBrep(model, mesh, scaleFactor);
-                            if (brep == null) continue;
-
-                            var shapeRep = model.Instances.New<IfcShapeRepresentation>(sr =>
-                            {
-                                sr.ContextOfItems = repContext;
-                                sr.RepresentationIdentifier = "Body";
-                                sr.RepresentationType = "Brep";
-                                sr.Items.Add(brep);
-                            });
-
-                            var productShape = model.Instances.New<IfcProductDefinitionShape>(ps =>
-                            {
-                                ps.Representations.Add(shapeRep);
-                            });
-
-                            element.Representation = productShape;
-
-                            // Object placement at origin
-                            element.ObjectPlacement = model.Instances.New<IfcLocalPlacement>(lp =>
-                            {
-                                lp.RelativePlacement = model.Instances.New<IfcAxis2Placement3D>(a =>
+                                var mesh = GeometryHelper.GetTriangulatedMesh(rhinoObj.Geometry);
+                                if (mesh == null || mesh.Vertices.Count < 3)
                                 {
-                                    a.Location = model.Instances.New<IfcCartesianPoint>(p2 =>
-                                        p2.SetXYZ(0, 0, 0));
-                                });
-                            });
+                                    RhinoApp.WriteLine($"Skipping '{rhinoObj.Name}': could not generate mesh (geometry type: {rhinoObj.Geometry.GetType().Name}).");
+                                    continue;
+                                }
 
-                            containment.RelatedElements.Add(element);
-                            exportedCount++;
+                                // Create the IFC element from user text metadata
+                                var element = metadataWriter.CreateElement(model, rhinoObj, doc);
+                                if (element == null) continue;
+
+                                // Apply all metadata (properties, quantities, materials)
+                                metadataWriter.ApplyMetadata(model, element, rhinoObj);
+
+                                // Create geometry as FacetedBrep
+                                var brep = CreateFacetedBrep(model, mesh, scaleFactor);
+                                if (brep == null) continue;
+
+                                var shapeRep = model.Instances.New<IfcShapeRepresentation>(sr =>
+                                {
+                                    sr.ContextOfItems = repContext;
+                                    sr.RepresentationIdentifier = "Body";
+                                    sr.RepresentationType = "Brep";
+                                    sr.Items.Add(brep);
+                                });
+
+                                var productShape = model.Instances.New<IfcProductDefinitionShape>(ps =>
+                                {
+                                    ps.Representations.Add(shapeRep);
+                                });
+
+                                element.Representation = productShape;
+
+                                // Object placement at origin
+                                element.ObjectPlacement = model.Instances.New<IfcLocalPlacement>(lp =>
+                                {
+                                    lp.RelativePlacement = model.Instances.New<IfcAxis2Placement3D>(a =>
+                                    {
+                                        a.Location = model.Instances.New<IfcCartesianPoint>(p2 =>
+                                            p2.SetXYZ(0, 0, 0));
+                                    });
+                                });
+
+                                containment.RelatedElements.Add(element);
+                                exportedCount++;
+                            }
+                            catch (Exception ex)
+                            {
+                                RhinoApp.WriteLine($"SERhinoIFC: Export failed for '{rhinoObj.Name}': {ex.Message}");
+                            }
                         }
                     }
 
