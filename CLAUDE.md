@@ -145,6 +145,14 @@ SERhinoIFC/
 
 ## Version History
 
+### SERhinoIFC (public repo)
+
+| Version | Description |
+|---------|-------------|
+| v0.1.0 | Initial public release — full feature set from development repo |
+
+### Development History (RhinoIFC-dev)
+
 | Version | Type | Description |
 |---------|------|-------------|
 | v1.0.0 | Major | Initial working build — basic IFC import/export |
