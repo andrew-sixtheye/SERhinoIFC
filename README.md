@@ -1,105 +1,73 @@
 # SERhinoIFC
 
-A compiled C# Rhino plugin (.rhp) that adds IFC import and export commands to Rhino 7 and Rhino 8 on Windows.
+A Rhino plugin for importing and exporting IFC (Industry Foundation Classes) files, built for light gauge steel framing workflows.
 
-## What It Does
+SERhinoIFC bridges Rhino and BIM — bringing IFC geometry into Rhino as meshes or Breps with full metadata, and exporting Rhino objects back to IFC for use in viewers, coordination tools, and fabrication software like FrameCAD/Constructobot.
 
-**`SEIfcImport`** — Import an IFC file as Rhino geometry with automatic unit detection.
+## Commands
 
-- Reads the declared length unit from the IFC file (meters, millimeters, feet, inches, etc.) and scales geometry to match the active Rhino document units. Never hardcodes a scale factor.
-- Organizes imported objects into layers by storey and IFC class: `Level 1::IfcWall`, `Level 1::IfcColumn`, etc.
-- Stores the IFC element name and GlobalId as Rhino object attributes.
+| Command | Description |
+|---------|-------------|
+| `SEIfcImport` | Import an IFC file into Rhino |
+| `SEIfcExport` | Export selected Rhino objects to IFC |
 
-**`SEIfcExport`** — Export selected Rhino objects to IFC with a configuration dialog.
+## Features
 
-The export dialog lets you choose between two modes:
+### Import
+- **Mesh or Brep geometry** — choose tessellated meshes (fast, reliable) or polysurface Breps (editable, precise)
+- **Automatic unit detection** — reads IFC length units (metric, imperial, all SI prefixes) and scales to match Rhino document units
+- **Full metadata** — IFC properties, quantities, materials, and type info stored as Rhino user text
+- **Layer organization** — objects sorted by storey and IFC class (`Level 1::IfcBeam`, etc.)
+- **Steel profile support** — C, I, U, L, Rectangle, Circle, and arbitrary closed profiles
 
-- **General IFC** — Exports geometry as `IfcFacetedBrep` (triangulated mesh). Produces valid IFC files that open in standard viewers (BIMvision, Solibri, etc.). Maps Rhino layer names to IFC element types (wall, slab, column, beam, roof) via keyword matching.
-
-- **FrameCAD / Constructobot** — Exports geometry as `IfcExtrudedAreaSolid` for compatibility with the FrameCAD IFCtoFramecad importer. Includes member naming conventions (`<Frame>-<Token>` format), TRUSS/PANEL layer classification, cold-formed steel material properties (550 MPa yield/ultimate), and profile property sets. Objects that cannot be represented as extrusions are skipped with a warning.
+### Export
+- **General IFC** — exports geometry as `IfcFacetedBrep` for standard IFC viewers (BIMvision, Solibri, etc.)
+- **SE-Cbot (FrameCAD/Constructobot)** — exports as `IfcExtrudedAreaSolid` with cold-formed steel material properties and profile property sets
+- **Metadata roundtrip** — Rhino user text is written back as IFC property sets, quantities, and materials
+- **Configurable** — unit selection, tolerance, IFC schema, author/organization fields
 
 ## Installation
 
-### From a Release Zip
+### From a Release
 
-1. Download the latest release `.zip` from the [Releases](../../releases) page.
-2. Unblock the zip: right-click the zip in Windows Explorer → Properties → check "Unblock" → OK.
-3. Extract the zip to a folder (e.g. `C:\Users\YourName\AppData\Roaming\McNeel\Rhinoceros\8.0\RhinoPlugins\SERhinoIFC\`).
-4. Open Rhino → Tools → Options → Plug-ins → Install → browse to `SERhinoIFC.rhp`.
-5. Restart Rhino. The `SEIfcImport` and `SEIfcExport` commands should now appear in the command autocomplete.
+1. Download the latest `.zip` from the [Releases](../../releases) page.
+2. **Unblock the zip** — right-click in Windows Explorer, Properties, check "Unblock", OK.
+3. Extract to a folder (e.g. `%AppData%\McNeel\Rhinoceros\8.0\RhinoPlugins\SERhinoIFC\`).
+4. In Rhino: Tools > Options > Plug-ins > Install > browse to `SERhinoIFC.rhp`.
+5. Restart Rhino.
 
 ### From Source
 
-Prerequisites:
-- .NET 8 SDK (or later) — needed to build `net48` targets
-- .NET Framework 4.8 targeting pack (included via NuGet, no separate install required)
+Requires .NET 8 SDK and .NET Framework 4.8 targeting pack.
 
 ```
-git clone https://github.com/andrew-sixtheye/RhinoIFC.git
-cd RhinoIFC
+git clone https://github.com/andrew-sixtheye/SERhinoIFC.git
+cd SERhinoIFC
 dotnet build
 ```
 
-The output `.rhp` is at `bin\x64\Debug\net48\SERhinoIFC.rhp`. Load it into Rhino via the Plugin Manager.
+Load `bin\x64\Debug\net48\SERhinoIFC.rhp` into Rhino via the Plugin Manager.
+
+## Requirements
+
+- **Rhino 7 or 8** (Windows)
+- Windows only — the xBIM Geometry Engine is a native C++ dependency that does not run on macOS
 
 ## Known Limitations
 
-- **Windows only.** The xBIM Geometry Engine (`Xbim.Geometry.Engine64.dll`) is a native C++ dependency (Open Cascade) that only runs on Windows. The plugin will not work on macOS even though Rhino 8 supports it.
-- **IFC2x3 only for export.** The export dialog shows IFC4 as an option, but the current implementation writes IFC2x3. IFC4 export is a future enhancement.
-- **FrameCAD export requires extrusion or prismatic brep geometry.** Freeform meshes, NURBS surfaces, and curves without profiles are skipped.
-- **No round-trip fidelity.** Importing an IFC file and re-exporting it will lose non-geometric data (property sets, type definitions, material assignments from the original file).
-
-## Packaging a Release
-
-To create a distributable zip for end users:
-
-```
-dotnet build -c Release
-```
-
-Then package the contents of `bin\x64\Release\net48\` into a zip:
-
-```powershell
-$outDir = "bin\x64\Release\net48"
-$files = Get-ChildItem $outDir -Include *.rhp,*.dll -Recurse
-Compress-Archive -Path $files.FullName -DestinationPath "SERhinoIFC-v1.0.0.zip"
-```
-
-The zip must include:
-- `SERhinoIFC.rhp` — the plugin (renamed .dll)
-- All `*.dll` files in the output directory (xBIM, Esent, Microsoft.Extensions, etc.)
-- `Xbim.Geometry.Engine64.dll` — the native geometry engine
-
-Do **not** include `RhinoCommon.dll` or `Eto.dll` — Rhino provides these at runtime. The build is already configured to exclude them.
-
-## Project Structure
-
-```
-SERhinoIFC/
-├── SERhinoIFC.sln
-├── SERhinoIFC.csproj
-├── SERhinoIFCPlugin.cs          # Plugin registration (GUID, OnLoad)
-├── Commands/
-│   ├── IfcImportCommand.cs      # SEIfcImport command
-│   └── IfcExportCommand.cs      # SEIfcExport command
-├── Import/
-│   ├── IfcImporter.cs           # Tessellation + mesh creation pipeline
-│   └── UnitResolver.cs          # Dynamic IFC unit detection
-├── Export/
-│   ├── ExportOptions.cs         # Options data class + ExportMode enum
-│   ├── GeneralExporter.cs       # IfcFacetedBrep export
-│   └── FrameCADExporter.cs      # IfcExtrudedAreaSolid export
-├── Dialogs/
-│   └── ExportOptionsDialog.cs   # Eto.Forms export config dialog
-└── Helpers/
-    ├── MemberClassifier.cs      # Layer name → IFC type mapping
-    └── GeometryHelper.cs        # Mesh generation from Brep/Extrusion
-```
+- **IFC2x3 export only** — IFC4 option exists in the UI but is not yet implemented
+- **No boolean geometry** — openings/voids are not subtracted on Brep import
+- **SE-Cbot export requires prismatic geometry** — freeform meshes and NURBS surfaces are skipped
+- **Limited profile types** — T-shape, hollow sections, Z-shape not yet supported
 
 ## Dependencies
 
 | Package | Version | Purpose |
 |---------|---------|---------|
-| RhinoCommon | 7.38.24338.17001 | Rhino API (excluded from output) |
-| Xbim.Essentials | 5.1.341 | IFC data model, file read/write |
-| Xbim.Geometry | 5.1.820 | IFC geometry tessellation (native) |
+| [xBIM Essentials](https://github.com/xBimTeam/XbimEssentials) | 5.1.341 | IFC data model, file I/O |
+| [xBIM Geometry](https://github.com/xBimTeam/XbimGeometry) | 5.1.820 | IFC geometry tessellation |
+| [RhinoCommon](https://www.nuget.org/packages/RhinoCommon) | 7.38+ | Rhino API (provided at runtime) |
+
+## License
+
+Proprietary. Copyright Sixth Eye.

@@ -164,6 +164,7 @@ SERhinoIFC/
 | v1.5.3 | Patch | Delete stale xbim temp file before export |
 | v1.5.4 | Patch | Fix Brep export crash (InMemoryModel + SimplePlanes) |
 | v1.5.5 | Patch | Fix assembly-level GUID for Rhino PlugInManager |
+| v1.5.6 | Patch | Rename commands to SEIfcImport/SEIfcExport |
 
 ## How To Build and Release
 
@@ -212,4 +213,4 @@ gh release create vX.Y.Z SERhinoIFC-vX.Y.Z.zip --title "vX.Y.Z" --notes "Release
 - **GUID**: `C06A81B4-E2D0-4732-9AAC-601B0592B58C` (assembly + class level)
 - **Load Time**: At Startup
 - **Organization**: Sixth Eye
-- **GitHub**: https://github.com/andrew-sixtheye/RhinoIFC
+- **GitHub**: https://github.com/andrew-sixtheye/SERhinoIFC
