@@ -8,7 +8,7 @@ namespace SERhinoIFC.Commands
 {
     public class IfcImportCommand : Command
     {
-        public override string EnglishName => "IfcImport";
+        public override string EnglishName => "SEIfcImport";
 
         protected override Result RunCommand(RhinoDoc doc, RunMode mode)
         {

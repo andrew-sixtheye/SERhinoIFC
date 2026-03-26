@@ -10,7 +10,7 @@ namespace SERhinoIFC.Commands
 {
     public class IfcExportCommand : Command
     {
-        public override string EnglishName => "IfcExport";
+        public override string EnglishName => "SEIfcExport";
 
         protected override Result RunCommand(RhinoDoc doc, RunMode mode)
         {

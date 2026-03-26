@@ -4,13 +4,13 @@ A compiled C# Rhino plugin (.rhp) that adds IFC import and export commands to Rh
 
 ## What It Does
 
-**`IfcImport`** — Import an IFC file as Rhino geometry with automatic unit detection.
+**`SEIfcImport`** — Import an IFC file as Rhino geometry with automatic unit detection.
 
 - Reads the declared length unit from the IFC file (meters, millimeters, feet, inches, etc.) and scales geometry to match the active Rhino document units. Never hardcodes a scale factor.
 - Organizes imported objects into layers by storey and IFC class: `Level 1::IfcWall`, `Level 1::IfcColumn`, etc.
 - Stores the IFC element name and GlobalId as Rhino object attributes.
 
-**`IfcExport`** — Export selected Rhino objects to IFC with a configuration dialog.
+**`SEIfcExport`** — Export selected Rhino objects to IFC with a configuration dialog.
 
 The export dialog lets you choose between two modes:
 
@@ -26,7 +26,7 @@ The export dialog lets you choose between two modes:
 2. Unblock the zip: right-click the zip in Windows Explorer → Properties → check "Unblock" → OK.
 3. Extract the zip to a folder (e.g. `C:\Users\YourName\AppData\Roaming\McNeel\Rhinoceros\8.0\RhinoPlugins\SERhinoIFC\`).
 4. Open Rhino → Tools → Options → Plug-ins → Install → browse to `SERhinoIFC.rhp`.
-5. Restart Rhino. The `IfcImport` and `IfcExport` commands should now appear in the command autocomplete.
+5. Restart Rhino. The `SEIfcImport` and `SEIfcExport` commands should now appear in the command autocomplete.
 
 ### From Source
 
@@ -80,8 +80,8 @@ SERhinoIFC/
 ├── SERhinoIFC.csproj
 ├── SERhinoIFCPlugin.cs          # Plugin registration (GUID, OnLoad)
 ├── Commands/
-│   ├── IfcImportCommand.cs      # IfcImport command
-│   └── IfcExportCommand.cs      # IfcExport command
+│   ├── IfcImportCommand.cs      # SEIfcImport command
+│   └── IfcExportCommand.cs      # SEIfcExport command
 ├── Import/
 │   ├── IfcImporter.cs           # Tessellation + mesh creation pipeline
 │   └── UnitResolver.cs          # Dynamic IFC unit detection
