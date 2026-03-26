@@ -1,8 +1,8 @@
 # SERhinoIFC
 
-A Rhino plugin for importing and exporting IFC (Industry Foundation Classes) files, built for light gauge steel framing workflows.
+A Rhino plugin for importing and exporting IFC (Industry Foundation Classes) files, built for light-gauge steel framing workflows.
 
-SERhinoIFC bridges Rhino and BIM — bringing IFC geometry into Rhino as meshes or Breps with full metadata, and exporting Rhino objects back to IFC for use in viewers, coordination tools, and fabrication software like FrameCAD/Constructobot.
+SERhinoIFC bridges Rhino and BIM — bringing IFC geometry into Rhino as meshes or Breps with full metadata, and exporting Rhino objects back to IFC for use in viewers, coordination tools, and custom software (if you need a custom exporter for your software reach out).
 
 ## Commands
 
