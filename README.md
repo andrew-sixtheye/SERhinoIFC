@@ -22,7 +22,7 @@ SERhinoIFC bridges Rhino and BIM — bringing IFC geometry into Rhino as meshes 
 
 ### Export
 - **General IFC** — exports geometry as `IfcFacetedBrep` for standard IFC viewers (BIMvision, Solibri, etc.)
-- **SE-Cbot (FrameCAD/Constructobot)** — exports as `IfcExtrudedAreaSolid` with cold-formed steel material properties and profile property sets
+- **SE-Cbot (custom)** — exports as `IfcExtrudedAreaSolid` with cold-formed steel material properties and profile property sets
 - **Metadata roundtrip** — Rhino user text is written back as IFC property sets, quantities, and materials
 - **Configurable** — unit selection, tolerance, IFC schema, author/organization fields
 
