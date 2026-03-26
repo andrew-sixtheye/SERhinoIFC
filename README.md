@@ -70,4 +70,8 @@ Load `bin\x64\Debug\net48\SERhinoIFC.rhp` into Rhino via the Plugin Manager.
 
 ## License
 
-Proprietary. Copyright Sixth Eye.
+The SERhinoIFC plugin code is Copyright Sixth Eye LLC, all rights reserved.
+
+This plugin uses the following open source libraries:
+- xBIM Essentials and xBIM Geometry (CDDL/CPAL license) — see https://docs.xbim.net/license.html
+- RhinoCommon (provided by McNeel at runtime)
